@@ -1,0 +1,76 @@
+// markdown_renderer.h
+// Streaming markdown renderer for wxRichTextCtrl.
+// Parses incoming deltas line-by-line, rendering complete lines with full
+// markdown formatting (bold, italic, code, headings, lists, code blocks)
+// while showing partial lines as plain text until they complete.
+
+#ifndef MARKDOWN_RENDERER_H
+#define MARKDOWN_RENDERER_H
+
+#include <wx/wx.h>
+#include <wx/richtext/richtextctrl.h>
+#include <string>
+
+class MarkdownRenderer
+{
+public:
+    MarkdownRenderer(wxRichTextCtrl* ctrl);
+    ~MarkdownRenderer() = default;
+
+    // ── Streaming interface ───────────────────────────────────────
+    // Call ProcessDelta() for each chunk of text as it arrives.
+    // Call Flush() once when the message is complete.
+    // Call Reset() before starting a new message.
+
+    void ProcessDelta(const std::string& delta, const wxColour& baseColor);
+    void Flush(const wxColour& baseColor);
+    void Reset();
+
+    // ── Color configuration ──────────────────────────────────────
+    void SetCodeColor(const wxColour& color)    { m_codeColor = color; }
+    void SetHeadingColor(const wxColour& color)  { m_headingColor = color; }
+
+private:
+    wxRichTextCtrl* m_ctrl;
+
+    // ── Streaming state ──────────────────────────────────────────
+    std::string m_lineBuffer;       // Accumulated text not yet rendered
+    bool        m_inCodeBlock;      // Currently inside a ``` fenced block
+    std::string m_codeBlockLang;    // Language tag from opening fence (if any)
+    long        m_partialLineStart; // Character position where partial line begins (-1 = none)
+
+    // ── Colors ───────────────────────────────────────────────────
+    wxColour m_codeColor;
+    wxColour m_headingColor;
+
+    // ── Block-level rendering ────────────────────────────────────
+    void RenderCompleteLine(const std::string& line, const wxColour& baseColor);
+    void RenderCodeBlockLine(const std::string& line);
+    void RenderHeading(const std::string& text, int level, const wxColour& baseColor);
+    void RenderBulletItem(const std::string& text, const wxColour& baseColor);
+    void RenderNumberedItem(const std::string& prefix, const std::string& text,
+                            const wxColour& baseColor);
+    void RenderHorizontalRule(const wxColour& baseColor);
+
+    // ── Inline markdown parsing ──────────────────────────────────
+    void RenderInlineMarkdown(const std::string& text, const wxColour& baseColor);
+
+    // ── Low-level text output ────────────────────────────────────
+    void WriteStyled(const std::string& text, const wxColour& color,
+                     bool bold = false, bool italic = false, bool monospace = false,
+                     int fontSizeDelta = 0);
+
+    // ── Partial line management ──────────────────────────────────
+    void RemovePartialLine();
+    void RenderPartialLine(const std::string& text, const wxColour& baseColor);
+
+    // ── Helpers ──────────────────────────────────────────────────
+    bool IsCodeFence(const std::string& line) const;
+    bool IsHorizontalRule(const std::string& line) const;
+    int  GetHeadingLevel(const std::string& line) const;
+    bool IsBulletItem(const std::string& line) const;
+    bool IsNumberedItem(const std::string& line, std::string& prefix) const;
+    std::string TrimLeading(const std::string& s, char c) const;
+};
+
+#endif // MARKDOWN_RENDERER_H
