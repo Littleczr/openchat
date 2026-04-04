@@ -45,7 +45,8 @@ struct ThemeData
 
     // ── Chat message colors ──────────────────────────────────────
     wxColour chatUser;          // User message text
-    wxColour chatAssistant;     // Assistant message text
+    wxColour chatAssistant;     // Assistant message text (Model A / single)
+    wxColour chatAssistantB;    // Assistant message text (Model B in group chat)
     wxColour chatSystem;        // System message text (italic)
     wxColour chatThought;       // <think> block text
 

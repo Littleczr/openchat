@@ -1,4 +1,4 @@
-# OpenChat
+# LlamaBoss
 
 A native desktop chat client for [Ollama](https://ollama.com), built with C++, wxWidgets, and Poco.
 
@@ -8,25 +8,29 @@ Fast, lightweight, and entirely local — no cloud, no telemetry, no Electron.
 
 ## Features
 
+- **Multi-model group chat** — invite a second model into the conversation. Model A responds first, then Model B responds having seen both your message and Model A's full response. Each model gets its own accent color.
 - **Streaming responses** with real-time token display
 - **Markdown rendering** — bold, italic, code, headings, lists, fenced code blocks with language labels
 - **`<think>` block support** — reasoning models (DeepSeek-R1, QwQ, etc.) display thought process in muted text before the answer
 - **Image vision** — attach images via file picker, drag-and-drop, or Ctrl+V clipboard paste
 - **Conversation history** — auto-save/load with a sidebar browser, right-click to delete
 - **Model management** — live model list from Ollama's API, auto-unload on model switch
+- **Dark & Light themes** — Telegram-inspired dark theme (default) and clean light theme, switchable live in Settings
 - **Keyboard shortcuts** — Ctrl+N (new chat), Ctrl+S (save), Ctrl+O (open)
-- **Dark & Light themes** — Telegram-inspired dark scheme + refined light palette, live switching or auto from Windows system setting
-- **Clickable model picker** — click the model pill in the toolbar to switch models instantly without opening Settings
 - **Window persistence** — remembers position, size, and maximized state across sessions
 - **Settings dialog** — change model and API URL at runtime with live model fetching
 
 ## Screenshots
 
-**Dark Theme**
-![OpenChat dark theme](docs/screenshots/screenshot-dark-theme.jpg)
+### Group Chat — Two models collaborating in real time
+![LlamaBoss group chat](docs/screenshots/screenshot-group-chat.png)
 
-**Light Theme**
-![OpenChat light theme](docs/screenshots/screenshot-light-theme.jpg)
+### Dark Theme
+![LlamaBoss dark theme](docs/screenshots/screenshot-dark-theme.jpg)
+
+## Download
+
+Pre-built Windows binaries are available on the [Releases](https://github.com/Littleczr/llamaboss/releases) page. Extract the zip and run `openchat.exe` — no installation required.
 
 ## Requirements
 
@@ -50,8 +54,8 @@ Set the environment variable `VCPKG_ROOT` to your vcpkg directory, or pass it to
 ### 2. Clone and build
 
 ```
-git clone https://github.com/yourusername/openchat.git
-cd openchat
+git clone https://github.com/Littleczr/llamaboss.git
+cd llamaboss
 ```
 
 **Option A — Visual Studio (recommended)**
@@ -84,37 +88,39 @@ Managed via vcpkg manifest (`vcpkg.json`):
 
 ## Configuration
 
-Settings are stored in the Windows registry under `HKCU\Software\OllamaChatApp` (via `wxFileConfig`).
+Settings are stored in the Windows registry under `HKCU\Software\LlamaBoss` (via `wxFileConfig`).
 
 | Key | Default | Description |
 |---|---|---|
 | `Model` | `llama3` | Ollama model name |
 | `ApiBaseUrl` | `http://127.0.0.1:11434` | Ollama API endpoint |
+| `Theme` | `dark` | UI theme (`dark` or `light`) |
 | `WindowX/Y/W/H` | — | Window geometry |
 | `WindowMaximized` | `false` | Maximized state |
 
-Conversations are saved as JSON files in `%APPDATA%\openchat\conversations\`.
+Conversations are saved as JSON files in `%APPDATA%\LlamaBoss\conversations\`.
 
 ## Project Structure
 
 ```
-openchat/
-├── openchat.cpp            # Main frame, UI layout, event wiring
+llamaboss/
+├── openchat.cpp            # Main frame, UI layout, event wiring, state machine
 ├── chat_client.h/.cpp      # HTTP streaming thread (Ollama /api/chat)
-├── chat_display.h/.cpp     # Message rendering (user/assistant/system/think)
-├── chat_history.h/.cpp     # Conversation state, JSON save/load
+├── chat_display.h/.cpp     # Message rendering with per-model accent colors
+├── chat_history.h/.cpp     # Conversation state, group chat context builder, JSON persistence
 ├── markdown_renderer.h/.cpp # Streaming markdown → wxRichTextCtrl
 ├── app_state.h/.cpp        # Config, logging, window state persistence
 ├── settings.h/.cpp         # Settings dialog with async model fetching
-├── theme.h/.cpp            # Theme definitions and color palette
+├── theme.h/.cpp            # Theme definitions (dark/light) and ThemeManager
 ├── CMakeLists.txt          # CMake build (alternative to .sln)
 ├── vcpkg.json              # Dependency manifest
 ├── openchat.sln            # Visual Studio solution
-└── docs/                   # Documentation
+└── docs/                   # Documentation and screenshots
 ```
 
 ## Usage Notes
 
+- **Group chat:** Click the `+` button next to the model name in the toolbar to invite a second model. Click `×` to remove it. Each model responds sequentially with its own color.
 - **Remote Ollama:** Change the API URL in Settings to point to any reachable Ollama instance (e.g. `http://192.168.1.74:11434`).
 - **Vision models:** Attach an image, then type your question. If you send an image with no text, the default prompt is "What is in this image?"
 - **Pasting images:** Ctrl+V detects clipboard images at the Windows `WM_PASTE` level, so it works even though the input is a multiline text control.
@@ -123,9 +129,3 @@ openchat/
 ## License
 
 [MIT](LICENSE)
-
-## Download
-
-See [Releases](https://github.com/Littleczr/openchat/releases) for pre-built Windows x64 binaries.
-
-**Latest:** [openchat-v1.1.1-win-x64.zip](https://github.com/Littleczr/openchat/releases/download/v1.1.1/openchat-v1.1.1-win-x64.zip)

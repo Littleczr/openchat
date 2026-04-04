@@ -30,14 +30,36 @@ ChatWorkerThread::ChatWorkerThread(wxEvtHandler* eventHandler,
     const std::string& model,
     const std::string& apiUrl,
     const std::string& requestBody,
-    std::shared_ptr<std::atomic<bool>> cancelFlag)
+    std::shared_ptr<std::atomic<bool>> cancelFlag,
+    std::weak_ptr<std::atomic<bool>> aliveToken,       // [STEP 1]
+    uint64_t generationId)                             // [STEP 2]
     : wxThread(wxTHREAD_DETACHED)
     , m_eventHandler(eventHandler)
     , m_model(model)
     , m_apiUrl(apiUrl)
     , m_requestBody(requestBody)
     , m_cancelFlag(cancelFlag)
+    , m_aliveToken(aliveToken)                         // [STEP 1]
+    , m_generationId(generationId)                     // [STEP 2]
 {
+}
+
+// ── [STEP 1] Safe event posting ──────────────────────────────────
+// Checks that the event handler's owner (MyFrame) is still alive
+// before posting.  If the owner is gone the event is deleted and
+// we return false so the caller knows to bail out.
+bool ChatWorkerThread::SafeQueueEvent(wxCommandEvent* event)
+{
+    auto alive = m_aliveToken.lock();
+    if (!alive || !alive->load()) {
+        delete event;   // owner is gone — discard event
+        return false;
+    }
+    // [STEP 2] Stamp every event with the generation ID so the
+    // handler can discard stale events from a previous request.
+    event->SetExtraLong(static_cast<long>(m_generationId));
+    wxQueueEvent(m_eventHandler, event);
+    return true;
 }
 
 wxThread::ExitCode ChatWorkerThread::Entry()
@@ -73,12 +95,12 @@ wxThread::ExitCode ChatWorkerThread::Entry()
             std::string err;
             Poco::StreamCopier::copyToString(in, err);
 
-            // Post error event
+            // [STEP 1] Post error via SafeQueueEvent
             wxCommandEvent* event = new wxCommandEvent(wxEVT_ASSISTANT_ERROR);
             event->SetString(wxString::FromUTF8(
                 "API Error: " + resp.getReason() + " - " + err
             ));
-            wxQueueEvent(m_eventHandler, event);
+            SafeQueueEvent(event);
             return (ExitCode)0;
         }
 
@@ -99,10 +121,11 @@ wxThread::ExitCode ChatWorkerThread::Entry()
                         std::string delta = msgObj->getValue<std::string>("content");
                         fullReply += delta;
 
-                        // Post delta event
+                        // [STEP 1] Post delta via SafeQueueEvent
                         wxCommandEvent* event = new wxCommandEvent(wxEVT_ASSISTANT_DELTA);
                         event->SetString(wxString::FromUTF8(delta));
-                        wxQueueEvent(m_eventHandler, event);
+                        if (!SafeQueueEvent(event))
+                            return (ExitCode)0;  // owner gone — stop immediately
                     }
                 }
                 if (obj->has("done") && obj->getValue<bool>("done"))
@@ -115,38 +138,38 @@ wxThread::ExitCode ChatWorkerThread::Entry()
         }
 
         if (!isCancelled()) {
-            // Post completion event
+            // [STEP 1] Post completion via SafeQueueEvent
             wxCommandEvent* event = new wxCommandEvent(wxEVT_ASSISTANT_COMPLETE);
             event->SetString(wxString::FromUTF8(fullReply));
-            wxQueueEvent(m_eventHandler, event);
+            SafeQueueEvent(event);
         }
     }
     catch (const Poco::Net::HTTPException& ex) {
         if (!isCancelled()) {
             wxCommandEvent* event = new wxCommandEvent(wxEVT_ASSISTANT_ERROR);
             event->SetString(wxString::FromUTF8("HTTP Error: " + ex.displayText()));
-            wxQueueEvent(m_eventHandler, event);
+            SafeQueueEvent(event);
         }
     }
     catch (const Poco::Net::NetException& ex) {
         if (!isCancelled()) {
             wxCommandEvent* event = new wxCommandEvent(wxEVT_ASSISTANT_ERROR);
             event->SetString(wxString::FromUTF8("Network Error: " + ex.displayText()));
-            wxQueueEvent(m_eventHandler, event);
+            SafeQueueEvent(event);
         }
     }
     catch (const Poco::Exception& ex) {
         if (!isCancelled()) {
             wxCommandEvent* event = new wxCommandEvent(wxEVT_ASSISTANT_ERROR);
             event->SetString(wxString::FromUTF8("Poco Error: " + ex.displayText()));
-            wxQueueEvent(m_eventHandler, event);
+            SafeQueueEvent(event);
         }
     }
     catch (const std::exception& ex) {
         if (!isCancelled()) {
             wxCommandEvent* event = new wxCommandEvent(wxEVT_ASSISTANT_ERROR);
             event->SetString(wxString::FromUTF8(std::string("Error: ") + ex.what()));
-            wxQueueEvent(m_eventHandler, event);
+            SafeQueueEvent(event);
         }
     }
 
@@ -157,8 +180,11 @@ wxThread::ExitCode ChatWorkerThread::Entry()
 // ChatClient Implementation
 // ═══════════════════════════════════════════════════════════════════
 
-ChatClient::ChatClient(wxEvtHandler* eventHandler)
+// [STEP 1] Constructor now stores a weak liveness token
+ChatClient::ChatClient(wxEvtHandler* eventHandler,
+                       std::weak_ptr<std::atomic<bool>> aliveToken)
     : m_eventHandler(eventHandler)
+    , m_aliveToken(aliveToken)
     , m_isStreaming(false)
 {
 }
@@ -168,9 +194,11 @@ ChatClient::~ChatClient()
     StopGeneration();
 }
 
+// [STEP 2] SendMessage now takes a generationId to pass through
 bool ChatClient::SendMessage(const std::string& model,
     const std::string& apiUrl,
-    const std::string& requestBody)
+    const std::string& requestBody,
+    uint64_t generationId)
 {
     if (m_isStreaming) {
         return false; // Already streaming
@@ -180,7 +208,8 @@ bool ChatClient::SendMessage(const std::string& model,
     m_cancelFlag = std::make_shared<std::atomic<bool>>(false);
 
     auto* thread = new ChatWorkerThread(
-        m_eventHandler, model, apiUrl, requestBody, m_cancelFlag);
+        m_eventHandler, model, apiUrl, requestBody,
+        m_cancelFlag, m_aliveToken, generationId);   // [STEP 1 + 2]
 
     if (thread->Run() != wxTHREAD_NO_ERROR) {
         // Thread not yet started — safe to delete manually

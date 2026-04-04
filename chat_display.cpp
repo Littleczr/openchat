@@ -12,6 +12,7 @@ ChatDisplay::ChatDisplay(wxRichTextCtrl* displayCtrl)
     , m_thoughtColor(154, 154, 154)    // Light gray (#9A9A9A)
     , m_isInThoughtBlock(false)
     , m_isFirstAssistantDelta(true)
+    , m_activeAssistantColor(125, 212, 160)
 {
     // Configure markdown renderer colors to match theme
     m_markdownRenderer->SetCodeColor(wxColour(232, 184, 77));    // Warm amber (#E8B84D)
@@ -60,15 +61,21 @@ void ChatDisplay::DisplaySystemMessage(const std::string& text)
 
 void ChatDisplay::DisplayAssistantPrefix(const std::string& modelName)
 {
+    DisplayAssistantPrefix(modelName, m_assistantColor);
+}
+
+void ChatDisplay::DisplayAssistantPrefix(const std::string& modelName, const wxColour& accentColor)
+{
     SetInsertionPointToEnd();
 
     // Reset state for the new message
     m_isInThoughtBlock = false;
     m_isFirstAssistantDelta = true;
+    m_activeAssistantColor = accentColor;
     m_markdownRenderer->Reset();
 
     wxRichTextAttr prefixAttr;
-    prefixAttr.SetTextColour(m_assistantColor);
+    prefixAttr.SetTextColour(accentColor);
     prefixAttr.SetFontWeight(wxFONTWEIGHT_BOLD);
     m_displayCtrl->BeginStyle(prefixAttr);
     m_displayCtrl->WriteText(wxString::FromUTF8(modelName + ": "));
@@ -106,7 +113,7 @@ void ChatDisplay::DisplayAssistantDelta(const std::string& delta)
 
             // Answer text: rendered with markdown
             if (!answer_part.empty()) {
-                m_markdownRenderer->ProcessDelta(answer_part, m_assistantColor);
+                m_markdownRenderer->ProcessDelta(answer_part, m_activeAssistantColor);
             }
         }
         else {
@@ -116,7 +123,7 @@ void ChatDisplay::DisplayAssistantDelta(const std::string& delta)
     }
     else {
         // Normal answer text — render with markdown formatting
-        m_markdownRenderer->ProcessDelta(remainingDelta, m_assistantColor);
+        m_markdownRenderer->ProcessDelta(remainingDelta, m_activeAssistantColor);
     }
 
     EnsureVisibleAtEnd();
@@ -130,8 +137,8 @@ void ChatDisplay::DisplayAssistantComplete()
         AppendFormattedText("\n\n", m_thoughtColor);
     }
     else {
-        m_markdownRenderer->Flush(m_assistantColor);
-        AppendFormattedText("\n\n", m_assistantColor);
+        m_markdownRenderer->Flush(m_activeAssistantColor);
+        AppendFormattedText("\n\n", m_activeAssistantColor);
     }
 
     m_isInThoughtBlock = false;

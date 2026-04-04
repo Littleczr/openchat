@@ -17,8 +17,10 @@ public:
     ~ChatHistory() = default;
 
     // Message management
+    // model param on assistant messages: tags which model produced the response.
+    // Empty string is valid (single-model legacy behavior).
     void AddUserMessage(const std::string& content);
-    void AddAssistantMessage(const std::string& content);
+    void AddAssistantMessage(const std::string& content, const std::string& model = "");
     void AddSystemMessage(const std::string& content);
 
     // History management
@@ -26,17 +28,30 @@ public:
     size_t GetMessageCount() const;
     bool IsEmpty() const;
 
-    // API integration
+    // ── API integration ───────────────────────────────────────────
+    // Build a standard single-model request body for Ollama /api/chat.
     std::string BuildChatRequestJson(const std::string& model, bool stream = true) const;
 
-    // Streaming support methods
-    void AddAssistantPlaceholder();
+    // Build a group-chat request body for Model B.
+    // Model A's assistant messages are rewritten as user messages with
+    // "[modelAName]: ..." prefix so Ollama sees them as context.
+    // Model B's own prior assistant messages keep their role.
+    // A system prompt is prepended explaining the group chat.
+    std::string BuildGroupChatRequestJson(const std::string& targetModel,
+                                          const std::string& peerModelName,
+                                          bool stream = true) const;
+
+    // ── Streaming support methods ─────────────────────────────────
+    void AddAssistantPlaceholder(const std::string& model = "");
     void UpdateLastAssistantMessage(const std::string& content);
     void RemoveLastAssistantMessage();
     bool HasAssistantPlaceholder() const;
 
-    // Access methods
+    // ── Access methods ────────────────────────────────────────────
     const std::vector<Poco::JSON::Object::Ptr>& GetMessages() const;
+
+    // Read the "model" field from a message (empty string if absent)
+    static std::string GetMessageModel(const Poco::JSON::Object::Ptr& msg);
 
     // Utility methods
     std::string GetLastUserMessage() const;
@@ -44,8 +59,15 @@ public:
 
     // ── File persistence ─────────────────────────────────────────
     // Save conversation to a JSON file. If filePath is empty, uses m_filePath.
+    // models: list of models used (single-element for normal chat, two for group).
+    bool SaveToFile(const std::string& filePath, const std::vector<std::string>& models);
+    // Convenience overload for single-model save (wraps into vector).
     bool SaveToFile(const std::string& filePath, const std::string& model);
-    // Load conversation from a JSON file. Returns the model name stored in the file.
+
+    // Load conversation from a JSON file.
+    // outModels: populated with the model(s) stored in the file.
+    bool LoadFromFile(const std::string& filePath, std::vector<std::string>& outModels);
+    // Convenience overload: returns first model only (backwards compat).
     bool LoadFromFile(const std::string& filePath, std::string& outModel);
 
     // File path management
@@ -76,7 +98,9 @@ private:
     std::string m_updatedAt;    // ISO timestamp of last save
 
     // Helper methods
-    Poco::JSON::Object::Ptr CreateMessage(const std::string& role, const std::string& content);
+    Poco::JSON::Object::Ptr CreateMessage(const std::string& role,
+                                          const std::string& content,
+                                          const std::string& model = "");
     bool IsLastMessageRole(const std::string& role) const;
     static std::string CurrentTimestamp();
 };

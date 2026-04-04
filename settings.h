@@ -1,4 +1,4 @@
-﻿// settings.h (updated)
+﻿// settings.h
 #ifndef SETTINGS_H
 #define SETTINGS_H
 
@@ -13,24 +13,33 @@
 #include <wx/thread.h>
 #include <string>
 #include <vector>
+#include <memory>
+#include <atomic>
 
-// Forward declaration for thread
-class SettingsDialog;
-
-// Thread for fetching models from Ollama
+// ── Thread for fetching models from Ollama ───────────────────────
+// [STEP 3] No longer holds a raw SettingsDialog pointer.  Instead it
+// posts results via wxQueueEvent through a generic wxEvtHandler* and
+// uses a shared cancel flag (same pattern as ChatWorkerThread).
 class ModelFetchThread : public wxThread
 {
 public:
-    ModelFetchThread(SettingsDialog* dialog, const std::string& apiUrl);
+    ModelFetchThread(wxEvtHandler* handler,
+                     const std::string& apiUrl,
+                     std::shared_ptr<std::atomic<bool>> cancelFlag);
 
 protected:
     virtual ExitCode Entry() override;
 
 private:
-    SettingsDialog* m_dialog;
+    wxEvtHandler* m_handler;
     std::string m_apiUrl;
+    std::shared_ptr<std::atomic<bool>> m_cancelFlag;
+
+    // Post event only if not cancelled; deletes event on cancel.
+    bool SafePost(wxCommandEvent* event);
 };
 
+// ── Settings dialog ──────────────────────────────────────────────
 class SettingsDialog : public wxDialog
 {
 public:
@@ -45,9 +54,9 @@ public:
     bool WasApiUrlChanged() const { return m_apiUrlChanged; }
     bool WasThemeChanged() const { return m_themeChanged; }
 
-    // Thread-safe methods for model fetching
-    void PostModelsReceived(const std::vector<std::string>& models);
-    void PostModelsFetchError(const std::string& error);
+    // [STEP 3] PostModelsReceived / PostModelsFetchError removed —
+    // the thread now sends data entirely through events, so the
+    // dialog no longer needs public methods callable from threads.
 
 private:
     void OnOK(wxCommandEvent& event);
@@ -80,8 +89,11 @@ private:
     bool m_themeChanged;
     bool m_isFetching;
 
-    ModelFetchThread* m_fetchThread;
-    std::vector<std::string> m_availableModels;
+    // [STEP 3/4] Replaced ModelFetchThread* m_fetchThread with a
+    // shared cancel flag.  We never store the thread pointer — the
+    // detached thread owns itself.  Cancellation is communicated
+    // exclusively through this atomic flag.
+    std::shared_ptr<std::atomic<bool>> m_cancelFlag;
 
     wxDECLARE_EVENT_TABLE();
 };

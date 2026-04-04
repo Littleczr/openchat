@@ -1,4 +1,4 @@
-﻿// settings.cpp (updated)
+﻿// settings.cpp
 #include "settings.h"
 #include <wx/fileconf.h>
 #include <wx/msgdlg.h>
@@ -15,6 +15,8 @@
 #include <Poco/JSON/Array.h>
 #include <Poco/JSON/Parser.h>
 #include <Poco/Exception.h>
+
+#include <sstream>
 
 // Define custom events
 wxDEFINE_EVENT(wxEVT_MODELS_RECEIVED, wxCommandEvent);
@@ -42,7 +44,7 @@ SettingsDialog::SettingsDialog(wxWindow* parent, const std::string& currentModel
     , m_apiUrlChanged(false)
     , m_themeChanged(false)
     , m_isFetching(false)
-    , m_fetchThread(nullptr)
+    // [STEP 4] m_fetchThread removed — no stored thread pointer
 {
     CreateControls();
 
@@ -54,14 +56,11 @@ SettingsDialog::SettingsDialog(wxWindow* parent, const std::string& currentModel
 
 SettingsDialog::~SettingsDialog()
 {
-    // NOTE: m_fetchThread is a detached thread; calling Delete() on it after
-    // it has already finished is technically a dangling-pointer use.  Because
-    // this is a modal dialog with a very short-lived thread (single GET),
-    // the race window is negligible.  A future cleanup could migrate to the
-    // same shared-atomic-cancel-flag pattern used in ChatClient.
-    if (m_fetchThread && m_isFetching) {
-        m_fetchThread->Delete();
-        m_fetchThread = nullptr;
+    // [STEP 4] Signal any running fetch thread to stop.
+    // The thread checks this flag and will bail out + discard its event.
+    // No dangling pointer — we never stored the thread pointer.
+    if (m_cancelFlag) {
+        m_cancelFlag->store(true);
     }
 }
 
@@ -98,9 +97,6 @@ void SettingsDialog::CreateControls()
     m_progressGauge = new wxGauge(this, wxID_ANY, 100);
     m_progressGauge->Hide(); // Initially hidden
     mainSizer->Add(m_progressGauge, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, 5);
-
-    // Future settings can be added here
-    // Font size, timeout settings, etc.
 
     // ── Theme selection ──────────────────────────────────────────
     mainSizer->AddSpacer(5);
@@ -146,13 +142,19 @@ void SettingsDialog::StartModelFetch()
     SetFetchingState(true);
     m_statusText->SetLabel("Fetching available models...");
 
-    m_fetchThread = new ModelFetchThread(this, apiUrl);
-    if (m_fetchThread->Run() != wxTHREAD_NO_ERROR) {
-        delete m_fetchThread;
-        m_fetchThread = nullptr;
+    // [STEP 3/4] Create a fresh cancel flag for this fetch.
+    // If a previous fetch is somehow still running, its old cancel flag
+    // is now orphaned (but harmless — the thread holds a shared_ptr to it).
+    m_cancelFlag = std::make_shared<std::atomic<bool>>(false);
+
+    auto* thread = new ModelFetchThread(this, apiUrl, m_cancelFlag);
+    if (thread->Run() != wxTHREAD_NO_ERROR) {
+        delete thread;
+        m_cancelFlag.reset();
         SetFetchingState(false);
         m_statusText->SetLabel("Failed to start model fetch");
     }
+    // Thread is now detached and running — we do NOT store its pointer.
 }
 
 void SettingsDialog::SetFetchingState(bool fetching)
@@ -192,11 +194,21 @@ void SettingsDialog::OnModelsReceived(wxCommandEvent& event)
 {
     SetFetchingState(false);
 
+    // [STEP 3] Parse newline-separated model list from the event.
+    // The thread packs model names into the event string so it never
+    // writes directly to dialog members from the worker thread.
+    std::vector<std::string> models;
+    std::istringstream stream(event.GetString().ToStdString());
+    std::string line;
+    while (std::getline(stream, line)) {
+        if (!line.empty()) models.push_back(line);
+    }
+
     // Clear existing items
     m_modelComboBox->Clear();
 
     // Add new models
-    for (const auto& model : m_availableModels) {
+    for (const auto& model : models) {
         m_modelComboBox->Append(wxString::FromUTF8(model));
     }
 
@@ -210,8 +222,7 @@ void SettingsDialog::OnModelsReceived(wxCommandEvent& event)
         m_modelComboBox->SetSelection(0);
     }
 
-    m_statusText->SetLabel(wxString::Format("Found %zu models", m_availableModels.size()));
-    m_fetchThread = nullptr;
+    m_statusText->SetLabel(wxString::Format("Found %zu models", models.size()));
 }
 
 void SettingsDialog::OnModelsFetchError(wxCommandEvent& event)
@@ -224,23 +235,10 @@ void SettingsDialog::OnModelsFetchError(wxCommandEvent& event)
     if (m_modelComboBox->GetCount() == 0) {
         m_modelComboBox->SetValue(wxString::FromUTF8(m_selectedModel));
     }
-
-    m_fetchThread = nullptr;
 }
 
-void SettingsDialog::PostModelsReceived(const std::vector<std::string>& models)
-{
-    m_availableModels = models;
-    wxCommandEvent* event = new wxCommandEvent(wxEVT_MODELS_RECEIVED);
-    wxQueueEvent(this, event);
-}
-
-void SettingsDialog::PostModelsFetchError(const std::string& error)
-{
-    wxCommandEvent* event = new wxCommandEvent(wxEVT_MODELS_FETCH_ERROR);
-    event->SetString(wxString::FromUTF8(error));
-    wxQueueEvent(this, event);
-}
+// [STEP 3] PostModelsReceived and PostModelsFetchError removed —
+// the thread now communicates entirely through wxCommandEvents.
 
 void SettingsDialog::OnOK(wxCommandEvent& event)
 {
@@ -271,10 +269,9 @@ void SettingsDialog::OnOK(wxCommandEvent& event)
 
 void SettingsDialog::OnCancel(wxCommandEvent& event)
 {
-    // Stop any ongoing fetch
-    if (m_fetchThread && m_isFetching) {
-        m_fetchThread->Delete();
-        m_fetchThread = nullptr;
+    // [STEP 4] Signal any running fetch to stop — no dangling pointer
+    if (m_cancelFlag) {
+        m_cancelFlag->store(true);
     }
 
     EndModal(wxID_CANCEL);
@@ -284,16 +281,33 @@ void SettingsDialog::OnCancel(wxCommandEvent& event)
 // ModelFetchThread Implementation
 // ═══════════════════════════════════════════════════════════════════
 
-ModelFetchThread::ModelFetchThread(SettingsDialog* dialog, const std::string& apiUrl)
+// [STEP 3] Takes a generic event handler + cancel flag instead of
+// a raw SettingsDialog pointer.
+ModelFetchThread::ModelFetchThread(wxEvtHandler* handler,
+                                   const std::string& apiUrl,
+                                   std::shared_ptr<std::atomic<bool>> cancelFlag)
     : wxThread(wxTHREAD_DETACHED)
-    , m_dialog(dialog)
+    , m_handler(handler)
     , m_apiUrl(apiUrl)
+    , m_cancelFlag(cancelFlag)
 {
+}
+
+// [STEP 3] Post event only if not cancelled.
+bool ModelFetchThread::SafePost(wxCommandEvent* event)
+{
+    if (m_cancelFlag->load()) {
+        delete event;
+        return false;
+    }
+    wxQueueEvent(m_handler, event);
+    return true;
 }
 
 wxThread::ExitCode ModelFetchThread::Entry()
 {
-    std::vector<std::string> models;
+    // Local cancellation check
+    auto isCancelled = [this]() { return m_cancelFlag->load(); };
 
     try {
         // Use Ollama's /api/tags endpoint to get available models
@@ -315,10 +329,12 @@ wxThread::ExitCode ModelFetchThread::Entry()
         if (resp.getStatus() != Poco::Net::HTTPResponse::HTTP_OK) {
             std::string err;
             Poco::StreamCopier::copyToString(in, err);
-            if (!TestDestroy()) {
-                m_dialog->PostModelsFetchError(
+            if (!isCancelled()) {
+                auto* event = new wxCommandEvent(wxEVT_MODELS_FETCH_ERROR);
+                event->SetString(wxString::FromUTF8(
                     "HTTP " + std::to_string(resp.getStatus()) + ": " + resp.getReason()
-                );
+                ));
+                SafePost(event);
             }
             return (ExitCode)0;
         }
@@ -327,52 +343,68 @@ wxThread::ExitCode ModelFetchThread::Entry()
         std::string responseBody;
         Poco::StreamCopier::copyToString(in, responseBody);
 
-        if (TestDestroy()) return (ExitCode)0;
+        if (isCancelled()) return (ExitCode)0;
 
         Poco::JSON::Parser parser;
         auto result = parser.parse(responseBody);
         auto obj = result.extract<Poco::JSON::Object::Ptr>();
 
+        // [STEP 3] Pack model names into a newline-separated string
+        // and send them through the event — no direct member writes.
+        wxString modelList;
         if (obj->has("models")) {
             auto modelsArray = obj->getArray("models");
             for (size_t i = 0; i < modelsArray->size(); ++i) {
-                if (TestDestroy()) return (ExitCode)0;
+                if (isCancelled()) return (ExitCode)0;
 
                 auto modelObj = modelsArray->getObject(i);
                 if (modelObj->has("name")) {
-                    std::string modelName = modelObj->getValue<std::string>("name");
-                    models.push_back(modelName);
+                    if (!modelList.empty()) modelList += "\n";
+                    modelList += wxString::FromUTF8(
+                        modelObj->getValue<std::string>("name"));
                 }
             }
         }
 
-        if (!TestDestroy()) {
-            m_dialog->PostModelsReceived(models);
+        if (!isCancelled()) {
+            auto* event = new wxCommandEvent(wxEVT_MODELS_RECEIVED);
+            event->SetString(modelList);
+            SafePost(event);
         }
     }
     catch (const Poco::Net::HTTPException& ex) {
-        if (!TestDestroy()) {
-            m_dialog->PostModelsFetchError("HTTP Error: " + ex.displayText());
+        if (!isCancelled()) {
+            auto* event = new wxCommandEvent(wxEVT_MODELS_FETCH_ERROR);
+            event->SetString(wxString::FromUTF8("HTTP Error: " + ex.displayText()));
+            SafePost(event);
         }
     }
     catch (const Poco::Net::NetException& ex) {
-        if (!TestDestroy()) {
-            m_dialog->PostModelsFetchError("Network Error: " + ex.displayText());
+        if (!isCancelled()) {
+            auto* event = new wxCommandEvent(wxEVT_MODELS_FETCH_ERROR);
+            event->SetString(wxString::FromUTF8("Network Error: " + ex.displayText()));
+            SafePost(event);
         }
     }
     catch (const Poco::JSON::JSONException& ex) {
-        if (!TestDestroy()) {
-            m_dialog->PostModelsFetchError("JSON Parse Error: " + ex.displayText());
+        if (!isCancelled()) {
+            auto* event = new wxCommandEvent(wxEVT_MODELS_FETCH_ERROR);
+            event->SetString(wxString::FromUTF8("JSON Parse Error: " + ex.displayText()));
+            SafePost(event);
         }
     }
     catch (const Poco::Exception& ex) {
-        if (!TestDestroy()) {
-            m_dialog->PostModelsFetchError("Poco Error: " + ex.displayText());
+        if (!isCancelled()) {
+            auto* event = new wxCommandEvent(wxEVT_MODELS_FETCH_ERROR);
+            event->SetString(wxString::FromUTF8("Poco Error: " + ex.displayText()));
+            SafePost(event);
         }
     }
     catch (const std::exception& ex) {
-        if (!TestDestroy()) {
-            m_dialog->PostModelsFetchError(std::string("Error: ") + ex.what());
+        if (!isCancelled()) {
+            auto* event = new wxCommandEvent(wxEVT_MODELS_FETCH_ERROR);
+            event->SetString(wxString::FromUTF8(std::string("Error: ") + ex.what()));
+            SafePost(event);
         }
     }
 

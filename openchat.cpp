@@ -42,7 +42,7 @@
 #include "app_state.h"
 
 // ─── Application version ─────────────────────────────────────
-static const char* OPENCHAT_VERSION = "1.1.1";
+static const char* OPENCHAT_VERSION = "1.2.0";
 
 // Custom event for model picker popup
 wxDEFINE_EVENT(wxEVT_MODEL_LIST_READY, wxCommandEvent);
@@ -147,8 +147,14 @@ private:
 // ─── Thread for quick model list fetch (model pill picker) ───
 class ModelPickerThread : public wxThread {
 public:
-    ModelPickerThread(wxEvtHandler* handler, const std::string& apiUrl)
-        : wxThread(wxTHREAD_DETACHED), m_handler(handler), m_apiUrl(apiUrl) {}
+    // [STEP 1] Now takes a weak liveness token from the frame
+    ModelPickerThread(wxEvtHandler* handler, const std::string& apiUrl,
+        std::weak_ptr<std::atomic<bool>> aliveToken)
+        : wxThread(wxTHREAD_DETACHED)
+        , m_handler(handler)
+        , m_apiUrl(apiUrl)
+        , m_aliveToken(aliveToken) {
+    }
 protected:
     ExitCode Entry() override {
         try {
@@ -164,9 +170,7 @@ protected:
             std::istream& in = sess.receiveResponse(resp);
 
             if (resp.getStatus() != Poco::Net::HTTPResponse::HTTP_OK) {
-                wxCommandEvent* evt = new wxCommandEvent(wxEVT_MODEL_LIST_READY);
-                evt->SetString("");
-                wxQueueEvent(m_handler, evt);
+                SafePost(new wxCommandEvent(wxEVT_MODEL_LIST_READY));
                 return (ExitCode)0;
             }
 
@@ -190,35 +194,58 @@ protected:
                 }
             }
 
-            wxCommandEvent* evt = new wxCommandEvent(wxEVT_MODEL_LIST_READY);
+            auto* evt = new wxCommandEvent(wxEVT_MODEL_LIST_READY);
             evt->SetString(modelList);
-            wxQueueEvent(m_handler, evt);
+            SafePost(evt);
         }
         catch (...) {
-            wxCommandEvent* evt = new wxCommandEvent(wxEVT_MODEL_LIST_READY);
-            evt->SetString("");
-            wxQueueEvent(m_handler, evt);
+            SafePost(new wxCommandEvent(wxEVT_MODEL_LIST_READY));
         }
         return (ExitCode)0;
     }
 private:
     wxEvtHandler* m_handler;
     std::string m_apiUrl;
+    std::weak_ptr<std::atomic<bool>> m_aliveToken;     // [STEP 1]
+
+    // [STEP 1] Post event only if owner frame is still alive
+    void SafePost(wxCommandEvent* evt) {
+        auto alive = m_aliveToken.lock();
+        if (alive && alive->load()) {
+            wxQueueEvent(m_handler, evt);
+        }
+        else {
+            delete evt;
+        }
+    }
+};
+
+// ═══════════════════════════════════════════════════════════════════
+//  Chat State Machine for single-model and group chat flows
+// ═══════════════════════════════════════════════════════════════════
+enum class ChatState {
+    Idle,              // Ready for user input
+    SingleStreaming,   // Normal single-model streaming
+    GroupModelA,       // Model A is streaming its response
+    GroupModelB,       // Model B is streaming its response
 };
 
 // ═══════════════════════════════════════════════════════════════════
 class MyFrame : public wxFrame {
 public:
     MyFrame()
-        : wxFrame(nullptr, wxID_ANY, "Ollama Chat",
+        : wxFrame(nullptr, wxID_ANY, "LlamaBoss",
             wxDefaultPosition, wxSize(1100, 700),
             wxDEFAULT_FRAME_STYLE)
         , m_appState(new AppState())
-        , m_chatClient(new ChatClient(this))
+        , m_alive(std::make_shared<std::atomic<bool>>(true))  // [STEP 1]
+        , m_chatClient(new ChatClient(this, m_alive))          // [STEP 1] pass token
         , m_chatDisplay(nullptr)
         , m_chatHistory(new ChatHistory())
         , m_sidebarVisible(false)
         , m_isClosing(false)
+        , m_generationId(0)                                    // [STEP 2]
+        , m_chatState(ChatState::Idle)
     {
         // Initialize application state first
         if (!m_appState->Initialize()) {
@@ -344,6 +371,7 @@ public:
         _modelPill->Bind(wxEVT_LEFT_UP, &MyFrame::OnModelPillClick, this);
         _modelLabel->Bind(wxEVT_LEFT_UP, &MyFrame::OnModelPillClick, this);
         _statusDot->Bind(wxEVT_LEFT_UP, &MyFrame::OnModelPillClick, this);
+        _groupToggleButton->Bind(wxEVT_BUTTON, &MyFrame::OnGroupToggleClick, this);
         Bind(wxEVT_MODEL_LIST_READY, &MyFrame::OnModelListReady, this);
 
         // ─── Drag-and-drop support ────────────────────────────────────
@@ -355,7 +383,7 @@ public:
         // can fire. ChatInputCtrl::MSWWindowProc intercepts WM_PASTE and
         // checks for a clipboard image before the native paste runs.
         _userInputCtrl->SetImagePasteHandler([this]() -> bool {
-            if (m_chatClient->IsStreaming()) return false;
+            if (IsBusy()) return false;
             return TryPasteImageFromClipboard();
         });
 
@@ -393,6 +421,11 @@ public:
 
     void OnClose(wxCloseEvent& evt)
     {
+        // [STEP 1] Kill the liveness token FIRST — this prevents any
+        // detached thread (ChatWorkerThread, ModelPickerThread) from
+        // posting events to this frame after this point.
+        m_alive->store(false);
+
         m_isClosing = true;
 
         if (m_chatClient->IsStreaming()) {
@@ -411,7 +444,7 @@ public:
     // ── Public interface for image attachment (used by drop target) ──
     bool AttachImageFromFile(const std::string& filePath)
     {
-        if (m_chatClient->IsStreaming()) return false;
+        if (IsBusy()) return false;
 
         wxFileName fname(wxString::FromUTF8(filePath));
         if (!fname.FileExists()) return false;
@@ -473,6 +506,19 @@ private:
     // Top bar controls
     wxStaticText* _modelLabel;
     StatusDot* _statusDot;
+    wxButton* _groupToggleButton;
+
+    // ─── Thread safety ────────────────────────────────────────────
+    // [STEP 1] Shared liveness token — threads hold a weak_ptr to this.
+    // Set to false in OnClose() before anything is destroyed, so all
+    // detached threads know to stop posting events to this frame.
+    std::shared_ptr<std::atomic<bool>> m_alive;
+
+    // [STEP 2] Monotonically increasing generation ID — incremented
+    // every time a new request starts or the current one is stopped.
+    // Stamped on every event by the worker thread; handlers discard
+    // events whose ID doesn't match the current generation.
+    uint64_t m_generationId;
 
     // ─── Application Components ───────────────────────────────────
     AppState* m_appState;
@@ -486,6 +532,15 @@ private:
 
     // ─── Model picker state ──────────────────────────────────────
     std::vector<std::string> m_pickerModels;
+    bool m_pickerIsForGroupB = false;  // True when picker is inviting Model B
+
+    // ─── Chat state machine ──────────────────────────────────────
+    ChatState m_chatState;
+
+    // ─── Group chat state ────────────────────────────────────────
+    std::string m_groupModelB;  // Empty = single mode, non-empty = group mode active
+
+
 
     // ═════════════════════════════════════════════════════════════
     //  UI CONSTRUCTION
@@ -509,7 +564,7 @@ private:
         _sidebarToggle->SetFont(hamburgerFont);
         sizer->Add(_sidebarToggle, 0, wxALIGN_CENTER_VERTICAL | wxLEFT, 4);
 
-        _titleLabel = new wxStaticText(_toolbarPanel, wxID_ANY, "Ollama Chat");
+        _titleLabel = new wxStaticText(_toolbarPanel, wxID_ANY, "LlamaBoss");
         _titleLabel->SetForegroundColour(m_appState->GetTheme().textPrimary);
         wxFont titleFont = _titleLabel->GetFont();
         titleFont.SetPointSize(15);
@@ -542,6 +597,19 @@ private:
         _modelPill->SetSizer(pillSizer);
         sizer->Add(_modelPill, 0, wxALIGN_CENTER_VERTICAL);
 
+        // ── Group chat toggle button (+ to invite, × to remove) ──
+        _groupToggleButton = new wxButton(_toolbarPanel, wxID_ANY, "+",
+            wxDefaultPosition, wxSize(36, 32), wxBORDER_NONE);
+        _groupToggleButton->SetBackgroundColour(m_appState->GetTheme().bgToolbar);
+        _groupToggleButton->SetForegroundColour(m_appState->GetTheme().accentButton);
+        _groupToggleButton->SetToolTip("Invite a second model to the conversation");
+        wxFont groupFont = _groupToggleButton->GetFont();
+        groupFont.SetPointSize(16);
+        groupFont.SetWeight(wxFONTWEIGHT_BOLD);
+        _groupToggleButton->SetFont(groupFont);
+        _groupToggleButton->SetCursor(wxCURSOR_HAND);
+        sizer->Add(_groupToggleButton, 0, wxALIGN_CENTER_VERTICAL | wxLEFT, 2);
+
         sizer->AddStretchSpacer(1);
 
         // ── Right: New Chat button ──
@@ -573,7 +641,7 @@ private:
             wxDefaultPosition, wxSize(48, 44), wxBORDER_NONE);
         _aboutButton->SetBackgroundColour(m_appState->GetTheme().bgToolbar);
         _aboutButton->SetForegroundColour(m_appState->GetTheme().textMuted);
-        _aboutButton->SetToolTip("About OpenChat");
+        _aboutButton->SetToolTip("About LlamaBoss");
         wxFont aboutFont = _aboutButton->GetFont();
         aboutFont.SetPointSize(18);
         _aboutButton->SetFont(aboutFont);
@@ -676,6 +744,10 @@ private:
         _topSeparator->SetBackgroundColour(t.borderSubtle);
         _statusDot->SetColors(t.accentButton, t.textMuted);
 
+        // Group toggle button
+        _groupToggleButton->SetBackgroundColour(t.bgToolbar);
+        UpdateGroupToggleButton();  // Sets foreground color based on state
+
         // ── Sidebar ──────────────────────────────────────────────
         _sidebarPanel->SetBackgroundColour(t.bgSidebar);
         _sidebarContent->SetBackgroundColour(t.bgSidebar);
@@ -722,15 +794,23 @@ private:
     {
         std::string model = m_appState->GetModel();
 
-        // Shorten: "pidrilkin/gemma3_27b_abliterated:Q4_K_M" → "gemma3_27b_abliterated:Q4_K_M"
-        std::string display = model;
-        size_t slash = model.rfind('/');
-        if (slash != std::string::npos && slash + 1 < model.size()) {
-            display = model.substr(slash + 1);
+        // Shorten: "pidrilkin/gemma3_27b_abliterated:Q4_K_M" -> "gemma3_27b_abliterated:Q4_K_M"
+        auto shortenModel = [](const std::string& m) -> std::string {
+            size_t slash = m.rfind('/');
+            if (slash != std::string::npos && slash + 1 < m.size())
+                return m.substr(slash + 1);
+            return m;
+        };
+
+        std::string display = shortenModel(model);
+
+        // In group mode, show both models
+        if (IsGroupMode()) {
+            display += " + " + shortenModel(m_groupModelB);
         }
 
         _modelLabel->SetLabel(wxString::FromUTF8(display) +
-            wxString::FromUTF8(" \xE2\x96\xBE"));  // ▾ dropdown indicator
+            wxString::FromUTF8(" \xE2\x96\xBE"));  // dropdown indicator
         _modelLabel->GetParent()->Layout();
     }
 
@@ -798,11 +878,36 @@ private:
         _attachButton->Enable(!streaming);
         _settingsButton->Enable(!streaming);
         _newChatButton->Enable(!streaming);
+        _groupToggleButton->Enable(!streaming);
         _inputSizer->Layout();
 
         if (!streaming) {
+            m_chatState = ChatState::Idle;
             _userInputCtrl->SetFocus();
         }
+    }
+
+    // Convenience: is the chat state machine busy (any model streaming)?
+    bool IsBusy() const { return m_chatState != ChatState::Idle; }
+
+    // Is group chat mode active (Model B assigned)?
+    bool IsGroupMode() const { return !m_groupModelB.empty(); }
+
+    // Get the accent color for a given model name
+    wxColour GetModelAccentColor(const std::string& modelName) const
+    {
+        if (IsGroupMode() && modelName == m_groupModelB) {
+            return m_appState->GetTheme().chatAssistantB;
+        }
+        return m_appState->GetTheme().chatAssistant;
+    }
+
+    // Build the models vector for file persistence
+    std::vector<std::string> GetActiveModels() const
+    {
+        std::vector<std::string> models = { m_appState->GetModel() };
+        if (IsGroupMode()) models.push_back(m_groupModelB);
+        return models;
     }
 
     // ═════════════════════════════════════════════════════════════
@@ -828,32 +933,81 @@ private:
     {
         if (m_isClosing) return;
 
+        // [STEP 2] Drop stale events from a cancelled/previous generation
+        if (static_cast<uint64_t>(event.GetExtraLong()) != m_generationId) return;
+
         m_chatDisplay->DisplayAssistantDelta(event.GetString().ToStdString());
     }
+
 
     void OnAssistantComplete(wxCommandEvent& event)
     {
         if (m_isClosing) return;
+
+        // Drop stale events from a cancelled/previous generation
+        if (static_cast<uint64_t>(event.GetExtraLong()) != m_generationId) return;
 
         std::string fullResponse = event.GetString().ToStdString();
 
         m_chatDisplay->DisplayAssistantComplete();
         m_chatHistory->UpdateLastAssistantMessage(fullResponse);
         m_chatClient->ResetStreamingState();
-        SetStreamingState(false);
 
-        // Auto-save conversation after each complete response
-        AutoSaveConversation();
+        if (m_chatState == ChatState::GroupModelA) {
+            // ─── Transition: Model A done → fire Model B ──────────────
+            std::string modelA = m_appState->GetModel();
+            std::string modelB = m_groupModelB;
 
-        if (auto* logger = m_appState->GetLogger())
-            logger->information("Chat response completed");
+            if (auto* logger = m_appState->GetLogger())
+                logger->information("Group chat: " + modelA + " done, starting " + modelB);
+
+            // Build Model B's context using the group chat builder.
+            // At this point, history contains: [..., user msg, modelA assistant msg]
+            // BuildGroupChatRequestJson will rewrite modelA's messages as user
+            // messages with [modelA]: prefix, and keep modelB's own as assistant.
+            std::string body = m_chatHistory->BuildGroupChatRequestJson(modelB, modelA, true);
+
+            // Add placeholder for Model B's response
+            m_chatHistory->AddAssistantPlaceholder(modelB);
+            m_chatDisplay->DisplayAssistantPrefix(modelB, GetModelAccentColor(modelB));
+
+            ++m_generationId;
+            m_chatState = ChatState::GroupModelB;
+
+            if (!m_chatClient->SendMessage(modelB, m_appState->GetApiUrl(),
+                body, m_generationId)) {
+                m_chatDisplay->DisplaySystemMessage("Failed to start " + modelB + " request");
+                m_chatHistory->RemoveLastAssistantMessage();
+                SetStreamingState(false);
+                // Model A's response is still in history — save it
+                AutoSaveConversation();
+            }
+        }
+        else {
+            // SingleStreaming or GroupModelB done — back to idle
+            SetStreamingState(false);
+            AutoSaveConversation();
+
+            if (auto* logger = m_appState->GetLogger())
+                logger->information("Chat response completed");
+        }
     }
+
 
     void OnAssistantError(wxCommandEvent& event)
     {
         if (m_isClosing) return;
 
+        // Drop stale events from a cancelled/previous generation
+        if (static_cast<uint64_t>(event.GetExtraLong()) != m_generationId) return;
+
         std::string error = event.GetString().ToStdString();
+
+        // Identify which model failed (for error messages)
+        std::string failedModel = m_appState->GetModel();
+        if (m_chatState == ChatState::GroupModelB) {
+            failedModel = m_groupModelB;
+        }
 
         std::string friendly;
 
@@ -870,16 +1024,21 @@ private:
         else if (error.find("Timeout") != std::string::npos ||
             error.find("timeout") != std::string::npos) {
 
-            friendly = "Request timed out. Ollama may be busy loading a model — try again in a moment.";
+            friendly = "Request timed out. Ollama may be busy loading a model \xe2\x80\x94 try again in a moment.";
         }
         else if (error.find("model") != std::string::npos &&
             error.find("not found") != std::string::npos) {
 
-            friendly = "Model \"" + m_appState->GetModel() + "\" was not found. "
-                "Open Settings to pick an available model, or run:\n ollama pull " + m_appState->GetModel();
+            friendly = "Model \"" + failedModel + "\" was not found. "
+                "Open Settings to pick an available model, or run:\n ollama pull " + failedModel;
         }
         else {
             friendly = "Error: " + error;
+        }
+
+        // In group mode, prefix the error with the model name for clarity
+        if (m_chatState == ChatState::GroupModelB) {
+            friendly = "[" + failedModel + "] " + friendly;
         }
 
         m_chatDisplay->DisplaySystemMessage(friendly);
@@ -887,8 +1046,11 @@ private:
         m_chatClient->ResetStreamingState();
         SetStreamingState(false);
 
+        // If Model B failed, Model A's response is still in history — save it
+        if (!m_chatHistory->IsEmpty()) AutoSaveConversation();
+
         if (auto* logger = m_appState->GetLogger())
-            logger->error("Chat error: " + error);
+            logger->error("Chat error (" + failedModel + "): " + error);
     }
 
     void OnToggleSidebar(wxCommandEvent&)
@@ -906,17 +1068,27 @@ private:
 
     void OnStopGeneration(wxCommandEvent&)
     {
-        if (m_chatClient->IsStreaming()) {
+        if (IsBusy()) {
+            // Bump generation ID so any queued delta/complete/error
+            // events from this request are silently dropped by the handlers.
+            ++m_generationId;
+
             m_chatClient->StopGeneration();
+            m_chatDisplay->DisplayAssistantComplete();
             m_chatDisplay->DisplaySystemMessage("Generation stopped by user");
             m_chatHistory->RemoveLastAssistantMessage();
             SetStreamingState(false);
+
+            // Auto-save: if Model A completed but Model B was stopped,
+            // Model A's response is still in history and worth saving.
+            if (!m_chatHistory->IsEmpty()) AutoSaveConversation();
         }
     }
 
+
     void OnOpenSettings(wxCommandEvent&)
     {
-        if (m_chatClient->IsStreaming()) {
+        if (IsBusy()) {
             wxMessageBox("Cannot change settings while generating response",
                 "Settings", wxOK | wxICON_INFORMATION);
             return;
@@ -947,7 +1119,9 @@ private:
                 m_chatHistory->Clear();
                 m_chatDisplay->Clear();
                 ClearPendingImage();
+                m_groupModelB.clear();
                 UpdateModelLabel();
+                UpdateGroupToggleButton();
 
                 m_chatDisplay->DisplaySystemMessage("Settings updated. Chat cleared.");
                 _userInputCtrl->SetFocus();
@@ -969,26 +1143,52 @@ private:
     void OnAbout(wxCommandEvent&)
     {
         wxString msg;
-        msg << "OpenChat v" << OPENCHAT_VERSION << "\n\n"
+        msg << "LlamaBoss v" << OPENCHAT_VERSION << "\n\n"
             << "A native desktop chat client for Ollama.\n\n"
             << "Built with wxWidgets + Poco\n"
             << "License: MIT\n\n"
             << wxString::FromUTF8("Model: ") << wxString::FromUTF8(m_appState->GetModel()) << "\n"
             << wxString::FromUTF8("API: ") << wxString::FromUTF8(m_appState->GetApiUrl());
-        wxMessageBox(msg, "About OpenChat", wxOK | wxICON_INFORMATION);
+        wxMessageBox(msg, "About LlamaBoss", wxOK | wxICON_INFORMATION);
     }
 
     // ─── Model pill click → fetch model list and show picker ─────
     void OnModelPillClick(wxMouseEvent&)
     {
-        if (m_chatClient->IsStreaming()) return;
+        if (IsBusy()) return;
 
-        // Start async model list fetch
-        auto* thread = new ModelPickerThread(this, m_appState->GetApiUrl());
+        m_pickerIsForGroupB = false;
+        auto* thread = new ModelPickerThread(
+            this, m_appState->GetApiUrl(), m_alive);
         if (thread->Run() != wxTHREAD_NO_ERROR) {
             delete thread;
             m_chatDisplay->DisplaySystemMessage(
                 "Failed to fetch model list. Is Ollama running?");
+        }
+    }
+
+    // ─── Group toggle button click ──────────────────────────────
+    void OnGroupToggleClick(wxCommandEvent&)
+    {
+        if (IsBusy()) return;
+
+        if (IsGroupMode()) {
+            // Remove Model B
+            m_groupModelB.clear();
+            UpdateModelLabel();
+            UpdateGroupToggleButton();
+            m_chatDisplay->DisplaySystemMessage("Group chat disabled. Single model mode.");
+        }
+        else {
+            // Invite Model B — fetch model list
+            m_pickerIsForGroupB = true;
+            auto* thread = new ModelPickerThread(
+                this, m_appState->GetApiUrl(), m_alive);
+            if (thread->Run() != wxTHREAD_NO_ERROR) {
+                delete thread;
+                m_chatDisplay->DisplaySystemMessage(
+                    "Failed to fetch model list. Is Ollama running?");
+            }
         }
     }
 
@@ -1014,36 +1214,96 @@ private:
 
         if (m_pickerModels.empty()) return;
 
-        // Build popup menu with checkmarks on the active model
-        wxMenu menu;
-        std::string currentModel = m_appState->GetModel();
+        if (m_pickerIsForGroupB) {
+            // ── Group mode: invite a second model ────────────────
+            wxMenu menu;
+            std::string currentModel = m_appState->GetModel();
+            std::string currentGroupB = m_groupModelB;
 
-        for (size_t i = 0; i < m_pickerModels.size(); ++i) {
-            wxMenuItem* item = menu.AppendCheckItem(
-                10000 + (int)i, wxString::FromUTF8(m_pickerModels[i]));
-            if (m_pickerModels[i] == currentModel) {
-                item->Check(true);
+            for (size_t i = 0; i < m_pickerModels.size(); ++i) {
+                const auto& name = m_pickerModels[i];
+                // Skip the primary model — can't invite yourself
+                if (name == currentModel) continue;
+                wxMenuItem* item = menu.AppendCheckItem(
+                    10000 + (int)i, wxString::FromUTF8(name));
+                if (name == currentGroupB) {
+                    item->Check(true);
+                }
             }
+
+            menu.Bind(wxEVT_MENU, [this](wxCommandEvent& e) {
+                int idx = e.GetId() - 10000;
+                if (idx >= 0 && idx < (int)m_pickerModels.size()) {
+                    SetGroupModelB(m_pickerModels[idx]);
+                }
+            });
+
+            // Show popup below the group toggle button
+            wxPoint pos = _groupToggleButton->GetScreenPosition();
+            pos = ScreenToClient(pos);
+            pos.y += _groupToggleButton->GetSize().y;
+            PopupMenu(&menu, pos);
         }
+        else {
+            // ── Normal mode: switch primary model ────────────────
+            wxMenu menu;
+            std::string currentModel = m_appState->GetModel();
 
-        menu.Bind(wxEVT_MENU, [this](wxCommandEvent& e) {
-            int idx = e.GetId() - 10000;
-            if (idx >= 0 && idx < (int)m_pickerModels.size()) {
-                SwitchToModel(m_pickerModels[idx]);
+            for (size_t i = 0; i < m_pickerModels.size(); ++i) {
+                wxMenuItem* item = menu.AppendCheckItem(
+                    10000 + (int)i, wxString::FromUTF8(m_pickerModels[i]));
+                if (m_pickerModels[i] == currentModel) {
+                    item->Check(true);
+                }
             }
-        });
 
-        // Show popup below the model pill
-        wxPoint pos = _modelPill->GetScreenPosition();
-        pos = ScreenToClient(pos);
-        pos.y += _modelPill->GetSize().y;
-        PopupMenu(&menu, pos);
+            menu.Bind(wxEVT_MENU, [this](wxCommandEvent& e) {
+                int idx = e.GetId() - 10000;
+                if (idx >= 0 && idx < (int)m_pickerModels.size()) {
+                    SwitchToModel(m_pickerModels[idx]);
+                }
+            });
+
+            // Show popup below the model pill
+            wxPoint pos = _modelPill->GetScreenPosition();
+            pos = ScreenToClient(pos);
+            pos.y += _modelPill->GetSize().y;
+            PopupMenu(&menu, pos);
+        }
+    }
+
+    // ─── Set/activate group Model B ──────────────────────────────
+    void SetGroupModelB(const std::string& model)
+    {
+        if (model == m_appState->GetModel()) return;  // Can't be same as Model A
+        m_groupModelB = model;
+        UpdateModelLabel();
+        UpdateGroupToggleButton();
+        m_chatDisplay->DisplaySystemMessage(
+            "Group chat enabled: " + m_appState->GetModel() + " + " + model);
+    }
+
+    // ─── Update group toggle button appearance ───────────────────
+    void UpdateGroupToggleButton()
+    {
+        if (IsGroupMode()) {
+            _groupToggleButton->SetLabel(wxString::FromUTF8("\xC3\x97")); // ×
+            _groupToggleButton->SetForegroundColour(m_appState->GetTheme().stopButton);
+            _groupToggleButton->SetToolTip("Remove " + wxString::FromUTF8(m_groupModelB) +
+                " from conversation");
+        }
+        else {
+            _groupToggleButton->SetLabel("+");
+            _groupToggleButton->SetForegroundColour(m_appState->GetTheme().accentButton);
+            _groupToggleButton->SetToolTip("Invite a second model to the conversation");
+        }
+        _groupToggleButton->Refresh();
     }
 
     void SwitchToModel(const std::string& newModel)
     {
         if (newModel == m_appState->GetModel()) return;
-        if (m_chatClient->IsStreaming()) return;
+        if (IsBusy()) return;
 
         // Save current conversation before switching
         if (!m_chatHistory->IsEmpty()) {
@@ -1056,7 +1316,9 @@ private:
         m_chatHistory->Clear();
         m_chatDisplay->Clear();
         ClearPendingImage();
+        m_groupModelB.clear();  // Clear group mode on model switch
         UpdateModelLabel();
+        UpdateGroupToggleButton();
         UpdateWindowTitle();
 
         m_chatDisplay->DisplaySystemMessage("Switched to " + newModel);
@@ -1069,7 +1331,7 @@ private:
 
     void OnNewChat(wxCommandEvent&)
     {
-        if (m_chatClient->IsStreaming()) return;
+        if (IsBusy()) return;
 
         // Save current conversation if it has content
         if (!m_chatHistory->IsEmpty()) {
@@ -1079,6 +1341,9 @@ private:
         m_chatHistory->Clear();
         m_chatDisplay->Clear();
         ClearPendingImage();
+        m_groupModelB.clear();  // Clear group mode on new chat
+        UpdateModelLabel();
+        UpdateGroupToggleButton();
         UpdateWindowTitle();
         RefreshConversationList();
         _userInputCtrl->SetFocus();
@@ -1093,7 +1358,7 @@ private:
 
         if (m_chatHistory->HasFilePath()) {
             // Already has a file — just save in place
-            if (m_chatHistory->SaveToFile("", m_appState->GetModel())) {
+            if (m_chatHistory->SaveToFile("", GetActiveModels())) {
                 m_chatDisplay->DisplaySystemMessage("Conversation saved.");
             }
         }
@@ -1120,7 +1385,7 @@ private:
             if (dlg.ShowModal() == wxID_CANCEL) return;
 
             std::string path = dlg.GetPath().ToStdString();
-            if (m_chatHistory->SaveToFile(path, m_appState->GetModel())) {
+            if (m_chatHistory->SaveToFile(path, GetActiveModels())) {
                 UpdateWindowTitle();
                 m_chatDisplay->DisplaySystemMessage("Conversation saved.");
             }
@@ -1132,7 +1397,7 @@ private:
 
     void OnLoadConversation(wxCommandEvent&)
     {
-        if (m_chatClient->IsStreaming()) return;
+        if (IsBusy()) return;
 
         // Save current conversation before loading a new one
         if (!m_chatHistory->IsEmpty()) {
@@ -1148,10 +1413,10 @@ private:
         if (dlg.ShowModal() == wxID_CANCEL) return;
 
         std::string path = dlg.GetPath().ToStdString();
-        std::string loadedModel;
+        std::vector<std::string> loadedModels;
 
         ChatHistory* newHistory = new ChatHistory();
-        if (!newHistory->LoadFromFile(path, loadedModel)) {
+        if (!newHistory->LoadFromFile(path, loadedModels)) {
             delete newHistory;
             wxMessageBox("Failed to load conversation file", "Error", wxOK | wxICON_ERROR);
             return;
@@ -1161,12 +1426,17 @@ private:
         delete m_chatHistory;
         m_chatHistory = newHistory;
 
-        // Update model if the loaded conversation used a different one
-        if (!loadedModel.empty() && loadedModel != m_appState->GetModel()) {
+        // Restore model(s) from the loaded conversation
+        std::string primaryModel = loadedModels.empty() ? "" : loadedModels.front();
+        if (!primaryModel.empty() && primaryModel != m_appState->GetModel()) {
             bool mc, ac;
-            m_appState->UpdateSettings(loadedModel, m_appState->GetApiUrl(), mc, ac);
-            UpdateModelLabel();
+            m_appState->UpdateSettings(primaryModel, m_appState->GetApiUrl(), mc, ac);
         }
+
+        // Restore group mode if conversation had two models
+        m_groupModelB = (loadedModels.size() >= 2) ? loadedModels[1] : "";
+        UpdateModelLabel();
+        UpdateGroupToggleButton();
 
         // Replay the conversation to the display
         m_chatDisplay->Clear();
@@ -1188,7 +1458,7 @@ private:
             m_chatHistory->SetFilePath(ChatHistory::GenerateFilePath());
         }
 
-        if (m_chatHistory->SaveToFile("", m_appState->GetModel())) {
+        if (m_chatHistory->SaveToFile("", GetActiveModels())) {
             UpdateWindowTitle();
             if (m_sidebarVisible) RefreshConversationList();
             if (auto* logger = m_appState->GetLogger())
@@ -1198,7 +1468,7 @@ private:
 
     void UpdateWindowTitle()
     {
-        std::string title = "Ollama Chat";
+        std::string title = "LlamaBoss";
         if (!m_chatHistory->IsEmpty()) {
             std::string convTitle = m_chatHistory->GetTitle();
             if (convTitle.empty()) {
@@ -1209,7 +1479,7 @@ private:
                 if (convTitle.size() > 40) {
                     convTitle = convTitle.substr(0, 37) + "...";
                 }
-                title = convTitle + " - Ollama Chat";
+                title = convTitle + " - LlamaBoss";
             }
         }
         SetTitle(wxString::FromUTF8(title));
@@ -1228,7 +1498,10 @@ private:
                 m_chatDisplay->DisplayUserMessage(content);
             }
             else if (role == "assistant") {
-                m_chatDisplay->DisplayAssistantPrefix(m_appState->GetModel());
+                // Read per-message model tag; fall back to primary model
+                std::string msgModel = ChatHistory::GetMessageModel(msg);
+                if (msgModel.empty()) msgModel = m_appState->GetModel();
+                m_chatDisplay->DisplayAssistantPrefix(msgModel, GetModelAccentColor(msgModel));
                 m_chatDisplay->DisplayAssistantDelta(content);
                 m_chatDisplay->DisplayAssistantComplete();
             }
@@ -1447,16 +1720,16 @@ private:
 
     bool LoadConversationFromPath(const std::string& path)
     {
-        if (m_chatClient->IsStreaming()) return false;
+        if (IsBusy()) return false;
 
         // Save current conversation before loading
         if (!m_chatHistory->IsEmpty()) {
             AutoSaveConversation();
         }
 
-        std::string loadedModel;
+        std::vector<std::string> loadedModels;
         ChatHistory* newHistory = new ChatHistory();
-        if (!newHistory->LoadFromFile(path, loadedModel)) {
+        if (!newHistory->LoadFromFile(path, loadedModels)) {
             delete newHistory;
             return false;
         }
@@ -1465,12 +1738,17 @@ private:
         delete m_chatHistory;
         m_chatHistory = newHistory;
 
-        // Update model if needed
-        if (!loadedModel.empty() && loadedModel != m_appState->GetModel()) {
+        // Restore model(s) from the loaded conversation
+        std::string primaryModel = loadedModels.empty() ? "" : loadedModels.front();
+        if (!primaryModel.empty() && primaryModel != m_appState->GetModel()) {
             bool mc, ac;
-            m_appState->UpdateSettings(loadedModel, m_appState->GetApiUrl(), mc, ac);
-            UpdateModelLabel();
+            m_appState->UpdateSettings(primaryModel, m_appState->GetApiUrl(), mc, ac);
         }
+
+        // Restore group mode if conversation had two models
+        m_groupModelB = (loadedModels.size() >= 2) ? loadedModels[1] : "";
+        UpdateModelLabel();
+        UpdateGroupToggleButton();
 
         // Replay to display
         m_chatDisplay->Clear();
@@ -1662,14 +1940,14 @@ private:
 
     void OnFrameActivate(wxActivateEvent& evt)
     {
-        if (evt.GetActive() && !m_chatClient->IsStreaming())
+        if (evt.GetActive() && !IsBusy())
             _userInputCtrl->SetFocus();
         evt.Skip();
     }
 
     void OnSendMessage(wxCommandEvent&)
     {
-        if (m_chatClient->IsStreaming()) return;
+        if (IsBusy()) return;
 
         std::string userInput = _userInputCtrl->GetValue().ToStdString();
         if (userInput.empty() && m_pendingImageBase64.empty()) return;
@@ -1686,7 +1964,9 @@ private:
         { wxCommandEvent e(wxEVT_TEXT, _userInputCtrl->GetId()); OnUserInputChanged(e); }
 
         m_chatHistory->AddUserMessage(userInput);
-        std::string body = m_chatHistory->BuildChatRequestJson(m_appState->GetModel(), true);
+
+        std::string modelA = m_appState->GetModel();
+        std::string body = m_chatHistory->BuildChatRequestJson(modelA, true);
 
         if (!m_pendingImageBase64.empty()) {
             body = InjectImageIntoRequest(body, m_pendingImageBase64);
@@ -1696,15 +1976,25 @@ private:
         if (auto* logger = m_appState->GetLogger())
             logger->debug("Request sent (" + std::to_string(body.size()) + " bytes)");
 
-        m_chatHistory->AddAssistantPlaceholder();
-        m_chatDisplay->DisplayAssistantPrefix(m_appState->GetModel());
+        m_chatHistory->AddAssistantPlaceholder(modelA);
+        m_chatDisplay->DisplayAssistantPrefix(modelA, GetModelAccentColor(modelA));
 
+        // New generation — bump ID so any leftover events from
+        // a previous (interrupted) request are discarded by the handlers.
+        ++m_generationId;
+
+        // Set state BEFORE SetStreamingState(true) because SetStreamingState(false)
+        // resets m_chatState to Idle — we don't want the true path to clobber it.
+        m_chatState = IsGroupMode() ? ChatState::GroupModelA : ChatState::SingleStreaming;
         SetStreamingState(true);
-        if (!m_chatClient->SendMessage(m_appState->GetModel(), m_appState->GetApiUrl(), body)) {
+
+        if (!m_chatClient->SendMessage(modelA, m_appState->GetApiUrl(),
+            body, m_generationId)) {
             SetStreamingState(false);
             m_chatDisplay->DisplaySystemMessage("Failed to start chat request");
             m_chatHistory->RemoveLastAssistantMessage();
         }
+
     }
 };
 

@@ -85,6 +85,7 @@ ThemeData ThemeManager::GetDarkTheme()
     // Chat message colors
     t.chatUser          = wxColour(108, 180, 238);     // Soft blue (#6CB4EE)
     t.chatAssistant     = wxColour(125, 212, 160);     // Mint green (#7DD4A0)
+    t.chatAssistantB    = wxColour(232, 168, 124);     // Warm coral (#E8A87C)
     t.chatSystem        = wxColour(136, 136, 136);     // Medium gray
     t.chatThought       = wxColour(154, 154, 154);     // Light gray
 
@@ -136,6 +137,7 @@ ThemeData ThemeManager::GetLightTheme()
     // Chat message colors
     t.chatUser          = wxColour(20, 75, 150);        // Deep blue (strong on white)
     t.chatAssistant     = wxColour(14, 105, 52);        // Deep green (strong on white)
+    t.chatAssistantB    = wxColour(168, 82, 20);        // Warm burnt orange (strong on white)
     t.chatSystem        = wxColour(115, 118, 124);      // Medium gray (readable)
     t.chatThought       = wxColour(140, 143, 150);      // Lighter gray
 

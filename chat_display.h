@@ -24,6 +24,7 @@ public:
     void DisplayUserMessage(const std::string& text);
     void DisplaySystemMessage(const std::string& text);
     void DisplayAssistantPrefix(const std::string& modelName);
+    void DisplayAssistantPrefix(const std::string& modelName, const wxColour& accentColor);
     void DisplayAssistantDelta(const std::string& delta);
     void DisplayAssistantComplete();
 
@@ -54,6 +55,7 @@ private:
     // State tracking for assistant messages
     bool m_isInThoughtBlock;      // True if we are currently printing thought text
     bool m_isFirstAssistantDelta; // True for the very first chunk of an assistant message
+    wxColour m_activeAssistantColor; // Color used for the current streaming response
 
     // Helper methods for formatting
     void AppendFormattedText(const std::string& text, const wxColour& color,
