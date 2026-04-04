@@ -78,6 +78,7 @@ ThemeData ThemeManager::GetDarkTheme()
     // Component backgrounds
     t.modelPillBg       = wxColour(43, 82, 120);      // #2B5278
     t.sidebarHover      = wxColour(24, 36, 48);       // Slightly lighter than sidebar
+    t.sidebarSelected   = wxColour(32, 56, 80);       // Blue tint for multi-select
 
     // Attachment
     t.attachIndicator   = wxColour(94, 181, 247);     // #5EB5F7
@@ -130,6 +131,7 @@ ThemeData ThemeManager::GetLightTheme()
     // Component backgrounds
     t.modelPillBg       = wxColour(200, 218, 245);     // Soft blue tint
     t.sidebarHover      = wxColour(228, 230, 236);     // Slightly darker than sidebar
+    t.sidebarSelected   = wxColour(210, 222, 240);     // Blue-gray tint for multi-select
 
     // Attachment
     t.attachIndicator   = wxColour(59, 130, 246);      // Blue

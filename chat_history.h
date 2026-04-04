@@ -19,7 +19,8 @@ public:
     // Message management
     // model param on assistant messages: tags which model produced the response.
     // Empty string is valid (single-model legacy behavior).
-    void AddUserMessage(const std::string& content);
+    // target param on user messages: which model was addressed (empty = group turn).
+    void AddUserMessage(const std::string& content, const std::string& target = "");
     void AddAssistantMessage(const std::string& content, const std::string& model = "");
     void AddSystemMessage(const std::string& content);
 
@@ -30,19 +31,26 @@ public:
 
     // ── API integration ───────────────────────────────────────────
     // Build a standard single-model request body for Ollama /api/chat.
-    std::string BuildChatRequestJson(const std::string& model, bool stream = true) const;
+    // If systemPrompt is non-empty, it is prepended as a system message.
+    std::string BuildChatRequestJson(const std::string& model, bool stream = true,
+                                     const std::string& systemPrompt = "") const;
+
+    std::string BuildParticipantChatRequestJson(const std::string& targetModel,
+        bool stream = true) const;
 
     // Build a group-chat request body for Model B.
     // Model A's assistant messages are rewritten as user messages with
     // "[modelAName]: ..." prefix so Ollama sees them as context.
     // Model B's own prior assistant messages keep their role.
-    // A system prompt is prepended explaining the group chat.
+    // If systemPrompt is non-empty, it replaces the default group prompt.
     std::string BuildGroupChatRequestJson(const std::string& targetModel,
                                           const std::string& peerModelName,
-                                          bool stream = true) const;
+                                          bool stream = true,
+                                          const std::string& systemPrompt = "") const;
 
     // ── Streaming support methods ─────────────────────────────────
     void AddAssistantPlaceholder(const std::string& model = "");
+    void AppendToLastAssistantMessage(const std::string& delta);
     void UpdateLastAssistantMessage(const std::string& content);
     void RemoveLastAssistantMessage();
     bool HasAssistantPlaceholder() const;
@@ -52,6 +60,9 @@ public:
 
     // Read the "model" field from a message (empty string if absent)
     static std::string GetMessageModel(const Poco::JSON::Object::Ptr& msg);
+
+    // Read the "target" field from a user message (empty string if absent/group turn)
+    static std::string GetMessageTarget(const Poco::JSON::Object::Ptr& msg);
 
     // Utility methods
     std::string GetLastUserMessage() const;

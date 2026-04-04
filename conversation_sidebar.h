@@ -1,0 +1,103 @@
+// conversation_sidebar.h
+// Collapsible sidebar that lists saved conversations.
+// Owns the sidebar UI panel, conversation list, and selection state.
+// Communicates back to the host frame via std::function callbacks.
+//
+// Selection model (file-explorer style):
+//   Click          = select one, load it
+//   Ctrl+Click     = toggle one in/out of selection (no load)
+//   Shift+Click    = range-select from anchor to clicked item
+//   Right-click    = context menu; preserves multi-selection if target is selected
+//   Delete menu    = deletes all selected conversations
+
+#pragma once
+
+#include <wx/wx.h>
+#include <wx/scrolwin.h>
+#include <functional>
+#include <string>
+#include <vector>
+#include <set>
+
+// Forward declarations
+struct ThemeData;
+
+class ConversationSidebar
+{
+public:
+    // Callbacks the host frame provides
+    struct Callbacks {
+        std::function<void(const std::string& path)>              onConversationClicked;
+        std::function<void()>                                      onNewChatClicked;
+        std::function<void(const std::vector<std::string>& paths)> onDeleteRequested;
+    };
+
+    ConversationSidebar(wxWindow* parent, const ThemeData& theme,
+                        const Callbacks& callbacks);
+    ~ConversationSidebar() = default;
+
+    // ── Visibility ───────────────────────────────────────────────
+    void Show();
+    void Hide();
+    bool IsVisible() const;
+    void Toggle();
+
+    // ── Content ──────────────────────────────────────────────────
+    // Rebuild the conversation list from disk.
+    // activeFilePath: the currently loaded conversation (highlighted).
+    void Refresh(const std::string& activeFilePath);
+
+    // ── Selection ────────────────────────────────────────────────
+    void ClearSelection();
+
+    // ── Theming ──────────────────────────────────────────────────
+    void ApplyTheme(const ThemeData& theme);
+
+    // ── Layout access ────────────────────────────────────────────
+    // Returns the top-level panel so the host frame can add it to a sizer.
+    wxPanel* GetPanel() const { return m_panel; }
+
+private:
+    // ── Internal data ────────────────────────────────────────────
+    struct ConversationEntry {
+        std::string filePath;
+        std::string title;
+        wxDateTime  modTime;
+    };
+
+    // ── UI widgets ───────────────────────────────────────────────
+    wxPanel*          m_panel;            // Outer panel (contains content + border)
+    wxPanel*          m_content;          // Content area (button + list)
+    wxPanel*          m_border;           // 1px vertical border on right edge
+    wxButton*         m_newChatButton;    // "+ New Chat" button
+    wxScrolledWindow* m_listWindow;       // Scrollable conversation list
+    wxBoxSizer*       m_listSizer;        // Sizer inside m_listWindow
+
+    // ── State ────────────────────────────────────────────────────
+    Callbacks    m_callbacks;
+    const ThemeData* m_theme;             // Current theme (not owned)
+    std::string  m_activeFilePath;        // Currently loaded conversation
+
+    // ── Multi-select state ───────────────────────────────────────
+    std::set<std::string>  m_selected;    // Set of selected file paths
+    std::string            m_anchorPath;  // Shift-click anchor
+    // Ordered list of file paths matching the current visual order,
+    // rebuilt on every Refresh(). Needed for Shift+Click range logic.
+    std::vector<std::string> m_orderedPaths;
+
+    // ── Helpers ──────────────────────────────────────────────────
+    std::vector<ConversationEntry> ScanConversations() const;
+    void BuildListEntry(const ConversationEntry& entry);
+    void ShowContextMenu(const std::string& filePath);
+
+    // Selection helpers
+    void SelectRange(const std::string& from, const std::string& to);
+    bool IsSelected(const std::string& path) const;
+    wxColour GetRowBackground(const std::string& filePath) const;
+    void RefreshAllRowBackgrounds();
+
+    // Walk up from a child widget to find the panel holding the .json path
+    static std::string PathFromWidget(wxWindow* win, wxWindow* stop);
+
+    static std::string RelativeTimeString(const wxDateTime& dt);
+};

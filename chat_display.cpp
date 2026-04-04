@@ -6,17 +6,18 @@
 ChatDisplay::ChatDisplay(wxRichTextCtrl* displayCtrl)
     : m_displayCtrl(displayCtrl)
     , m_markdownRenderer(new MarkdownRenderer(displayCtrl))
-    , m_userColor(108, 180, 238)      // Soft blue (#6CB4EE)
+    , m_userColor(108, 180, 238)       // Soft blue (#6CB4EE)
     , m_assistantColor(125, 212, 160)  // Mint green (#7DD4A0)
     , m_systemColor(136, 136, 136)     // Medium gray (#888888)
     , m_thoughtColor(154, 154, 154)    // Light gray (#9A9A9A)
     , m_isInThoughtBlock(false)
     , m_isFirstAssistantDelta(true)
+    , m_hasRenderedAssistantContent(false)
     , m_activeAssistantColor(125, 212, 160)
 {
     // Configure markdown renderer colors to match theme
-    m_markdownRenderer->SetCodeColor(wxColour(232, 184, 77));    // Warm amber (#E8B84D)
-    m_markdownRenderer->SetHeadingColor(wxColour(232, 232, 232)); // Near-white (#E8E8E8)
+    m_markdownRenderer->SetCodeColor(wxColour(232, 184, 77));      // Warm amber (#E8B84D)
+    m_markdownRenderer->SetHeadingColor(wxColour(232, 232, 232));  // Near-white (#E8E8E8)
 }
 
 ChatDisplay::~ChatDisplay()
@@ -24,7 +25,8 @@ ChatDisplay::~ChatDisplay()
     delete m_markdownRenderer;
 }
 
-void ChatDisplay::DisplayUserMessage(const std::string& text)
+void ChatDisplay::DisplayUserMessage(const std::string& text,
+                                     const std::string& target)
 {
     SetInsertionPointToEnd();
 
@@ -32,7 +34,21 @@ void ChatDisplay::DisplayUserMessage(const std::string& text)
     prefixAttr.SetTextColour(m_userColor);
     prefixAttr.SetFontWeight(wxFONTWEIGHT_BOLD);
     m_displayCtrl->BeginStyle(prefixAttr);
-    m_displayCtrl->WriteText("You: ");
+
+    if (!target.empty()) {
+        // Shorten the target name for display:
+        // "pidrilkin/gemma3:Q4_K_M" → "gemma3:Q4_K_M"
+        std::string shortTarget = target;
+        size_t slash = shortTarget.rfind('/');
+        if (slash != std::string::npos && slash + 1 < shortTarget.size())
+            shortTarget = shortTarget.substr(slash + 1);
+
+        m_displayCtrl->WriteText(wxString::FromUTF8(
+            "You \xe2\x86\x92 " + shortTarget + ": "));  // → arrow
+    }
+    else {
+        m_displayCtrl->WriteText("You: ");
+    }
     m_displayCtrl->EndStyle();
 
     wxRichTextAttr textAttr;
@@ -71,12 +87,24 @@ void ChatDisplay::DisplayAssistantPrefix(const std::string& modelName, const wxC
     // Reset state for the new message
     m_isInThoughtBlock = false;
     m_isFirstAssistantDelta = true;
+    m_hasRenderedAssistantContent = false;
     m_activeAssistantColor = accentColor;
     m_markdownRenderer->Reset();
+
+    wxFont baseFont = m_displayCtrl->GetFont();
+    int baseSize = baseFont.GetPointSize();
+    if (baseSize <= 0) baseSize = 14;
 
     wxRichTextAttr prefixAttr;
     prefixAttr.SetTextColour(accentColor);
     prefixAttr.SetFontWeight(wxFONTWEIGHT_BOLD);
+    prefixAttr.SetFontStyle(wxFONTSTYLE_NORMAL);
+    prefixAttr.SetFontSize(baseSize);
+
+    if (!baseFont.GetFaceName().empty()) {
+        prefixAttr.SetFontFaceName(baseFont.GetFaceName());
+    }
+
     m_displayCtrl->BeginStyle(prefixAttr);
     m_displayCtrl->WriteText(wxString::FromUTF8(modelName + ": "));
     m_displayCtrl->EndStyle();
@@ -86,6 +114,22 @@ void ChatDisplay::DisplayAssistantDelta(const std::string& delta)
 {
     SetInsertionPointToEnd();
     std::string remainingDelta = delta;
+
+    const auto trimLeadingWhitespace = [](std::string& text)
+        {
+            size_t first = text.find_first_not_of(" \t\r\n");
+            if (first == std::string::npos) {
+                text.clear();
+            }
+            else if (first > 0) {
+                text.erase(0, first);
+            }
+        };
+
+    const auto hasVisibleChars = [](const std::string& text) -> bool
+        {
+            return text.find_first_not_of(" \t\r\n") != std::string::npos;
+        };
 
     // Markers for different reasoning models
     const std::string thought_start_marker = "<think>";
@@ -107,23 +151,55 @@ void ChatDisplay::DisplayAssistantDelta(const std::string& delta)
             std::string thought_part = remainingDelta.substr(0, end_pos);
             std::string answer_part = remainingDelta.substr(end_pos + thought_end_marker.length());
 
-            // Thought text: plain formatting (no markdown)
-            AppendFormattedText(thought_part, m_thoughtColor);
+            // If nothing visible has been rendered yet, strip leading blank lines/spaces.
+            if (!m_hasRenderedAssistantContent) {
+                trimLeadingWhitespace(thought_part);
+            }
+
+            // Only render thought text if it actually contains visible characters.
+            if (hasVisibleChars(thought_part)) {
+                AppendFormattedText(thought_part, m_thoughtColor);
+                m_hasRenderedAssistantContent = true;
+            }
+
             m_isInThoughtBlock = false;
 
-            // Answer text: rendered with markdown
+            // Trim leading blank space before the first visible answer text.
+            if (!m_hasRenderedAssistantContent) {
+                trimLeadingWhitespace(answer_part);
+            }
+
             if (!answer_part.empty()) {
                 m_markdownRenderer->ProcessDelta(answer_part, m_activeAssistantColor);
+                if (hasVisibleChars(answer_part)) {
+                    m_hasRenderedAssistantContent = true;
+                }
             }
         }
         else {
             // Still in thought block, no end marker in this delta
-            AppendFormattedText(remainingDelta, m_thoughtColor);
+            if (!m_hasRenderedAssistantContent) {
+                trimLeadingWhitespace(remainingDelta);
+            }
+
+            if (hasVisibleChars(remainingDelta)) {
+                AppendFormattedText(remainingDelta, m_thoughtColor);
+                m_hasRenderedAssistantContent = true;
+            }
         }
     }
     else {
-        // Normal answer text — render with markdown formatting
-        m_markdownRenderer->ProcessDelta(remainingDelta, m_activeAssistantColor);
+        // Normal answer text — trim leading blank space only at the very start
+        if (!m_hasRenderedAssistantContent) {
+            trimLeadingWhitespace(remainingDelta);
+        }
+
+        if (!remainingDelta.empty()) {
+            m_markdownRenderer->ProcessDelta(remainingDelta, m_activeAssistantColor);
+            if (hasVisibleChars(remainingDelta)) {
+                m_hasRenderedAssistantContent = true;
+            }
+        }
     }
 
     EnsureVisibleAtEnd();
@@ -143,6 +219,44 @@ void ChatDisplay::DisplayAssistantComplete()
 
     m_isInThoughtBlock = false;
     m_isFirstAssistantDelta = true;
+    m_hasRenderedAssistantContent = false;
+}
+
+void ChatDisplay::DisplayAssistantMessage(const std::string& modelName,
+    const std::string& content,
+    const wxColour& accentColor)
+{
+    DisplayAssistantPrefix(modelName, accentColor);
+
+    m_markdownRenderer->Reset();
+
+    if (!content.empty()) {
+        // Strip leading whitespace/newlines so the first paragraph renders
+        // flush with the prefix — matches the trim that DisplayAssistantDelta
+        // performs on the streaming path.
+        std::string trimmed = content;
+        size_t first = trimmed.find_first_not_of(" \t\r\n");
+        if (first == std::string::npos) {
+            trimmed.clear();
+        } else if (first > 0) {
+            trimmed.erase(0, first);
+        }
+
+        // Render the whole saved/final message in one shot,
+        // not through the streaming path.
+        if (!trimmed.empty()) {
+            m_markdownRenderer->ProcessDelta(trimmed, accentColor);
+            m_markdownRenderer->Flush(accentColor);
+        }
+    }
+
+    AppendFormattedText("\n\n", accentColor);
+
+    m_isInThoughtBlock = false;
+    m_isFirstAssistantDelta = true;
+    m_hasRenderedAssistantContent = false;
+
+    EnsureVisibleAtEnd();
 }
 
 void ChatDisplay::Clear()
@@ -189,10 +303,10 @@ void ChatDisplay::SetFont(const wxFont& font)
 
 void ChatDisplay::ApplyTheme(const ThemeData& theme)
 {
-    m_userColor      = theme.chatUser;
+    m_userColor = theme.chatUser;
     m_assistantColor = theme.chatAssistant;
-    m_systemColor    = theme.chatSystem;
-    m_thoughtColor   = theme.chatThought;
+    m_systemColor = theme.chatSystem;
+    m_thoughtColor = theme.chatThought;
 
     if (m_markdownRenderer) {
         m_markdownRenderer->SetCodeColor(theme.mdCode);

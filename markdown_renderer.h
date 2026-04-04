@@ -36,10 +36,11 @@ private:
     wxRichTextCtrl* m_ctrl;
 
     // ── Streaming state ──────────────────────────────────────────
-    std::string m_lineBuffer;       // Accumulated text not yet rendered
-    bool        m_inCodeBlock;      // Currently inside a ``` fenced block
-    std::string m_codeBlockLang;    // Language tag from opening fence (if any)
-    long        m_partialLineStart; // Character position where partial line begins (-1 = none)
+    std::string m_lineBuffer;          // Accumulated text not yet rendered
+    bool        m_inCodeBlock;         // Currently inside a ``` fenced block
+    std::string m_codeBlockLang;       // Language tag from opening fence (if any)
+    long        m_partialLineStart;    // Character position where partial line begins (-1 = none)
+    bool        m_hasRenderedStableLine; // True after the first complete line has been rendered
 
     // ── Colors ───────────────────────────────────────────────────
     wxColour m_codeColor;

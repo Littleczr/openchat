@@ -1,4 +1,7 @@
 ﻿// File: openchat.cpp (redesigned UI layout + image attach + drag-drop)
+#define _CRT_SECURE_NO_WARNINGS
+
+#include <cctype>
 #include <wx/wx.h>
 #include <wx/artprov.h>
 #include <wx/textdlg.h>
@@ -40,9 +43,11 @@
 #include "chat_display.h"
 #include "chat_history.h"
 #include "app_state.h"
+#include "conversation_sidebar.h"
+#include "message_router.h"
 
 // ─── Application version ─────────────────────────────────────
-static const char* OPENCHAT_VERSION = "1.2.0";
+static const char* OPENCHAT_VERSION = "1.3.0";
 
 // Custom event for model picker popup
 wxDEFINE_EVENT(wxEVT_MODEL_LIST_READY, wxCommandEvent);
@@ -226,15 +231,22 @@ private:
 enum class ChatState {
     Idle,              // Ready for user input
     SingleStreaming,   // Normal single-model streaming
-    GroupModelA,       // Model A is streaming its response
-    GroupModelB,       // Model B is streaming its response
+    GroupModelA,       // Model A is streaming its response (will chain to B)
+    GroupModelB,       // Model B is streaming its response (chained from A)
+    GroupDirected,     // One specific model streaming in group mode (no chain)
+};
+
+enum class TurnRoute {
+    GroupAll,
+    DirectModelA,
+    DirectModelB
 };
 
 // ═══════════════════════════════════════════════════════════════════
 class MyFrame : public wxFrame {
 public:
     MyFrame()
-        : wxFrame(nullptr, wxID_ANY, "LlamaBoss",
+        : wxFrame(nullptr, wxID_ANY, "Ollama Chat",
             wxDefaultPosition, wxSize(1100, 700),
             wxDEFAULT_FRAME_STYLE)
         , m_appState(new AppState())
@@ -242,7 +254,7 @@ public:
         , m_chatClient(new ChatClient(this, m_alive))          // [STEP 1] pass token
         , m_chatDisplay(nullptr)
         , m_chatHistory(new ChatHistory())
-        , m_sidebarVisible(false)
+        , m_sidebar(nullptr)
         , m_isClosing(false)
         , m_generationId(0)                                    // [STEP 2]
         , m_chatState(ChatState::Idle)
@@ -263,49 +275,21 @@ public:
         // ─── CONTENT AREA (sidebar + chat) ────────────────────────────
         _contentSizer = new wxBoxSizer(wxHORIZONTAL);
 
-        // ── Sidebar panel (collapsible) ──
-        _sidebarPanel = new wxPanel(this, wxID_ANY);
-        _sidebarPanel->SetBackgroundColour(m_appState->GetTheme().bgSidebar);
-        _sidebarPanel->SetMinSize(wxSize(260, -1));
-
-        auto* sidebarOuterSizer = new wxBoxSizer(wxHORIZONTAL);
-
-        // ── Sidebar content area ──
-        _sidebarContent = new wxPanel(_sidebarPanel, wxID_ANY);
-        _sidebarContent->SetBackgroundColour(m_appState->GetTheme().bgSidebar);
-        auto* sidebarContentSizer = new wxBoxSizer(wxVERTICAL);
-
-        // "New Chat" button at top
-        _sidebarNewChat = new wxButton(_sidebarContent, wxID_ANY, "+ New Chat",
-            wxDefaultPosition, wxSize(-1, 42), wxBORDER_NONE);
-        _sidebarNewChat->SetBackgroundColour(m_appState->GetTheme().modelPillBg);
-        _sidebarNewChat->SetForegroundColour(m_appState->GetTheme().textPrimary);
-        wxFont ncFont = _sidebarNewChat->GetFont();
-        ncFont.SetPointSize(11);
-        ncFont.SetWeight(wxFONTWEIGHT_MEDIUM);
-        _sidebarNewChat->SetFont(ncFont);
-        sidebarContentSizer->Add(_sidebarNewChat, 0, wxEXPAND | wxALL, 8);
-
-        // Scrollable conversation list
-        _conversationList = new wxScrolledWindow(_sidebarContent, wxID_ANY,
-            wxDefaultPosition, wxDefaultSize, wxVSCROLL);
-        _conversationList->SetBackgroundColour(m_appState->GetTheme().bgSidebar);
-        _conversationList->SetScrollRate(0, 8);
-        _conversationListSizer = new wxBoxSizer(wxVERTICAL);
-        _conversationList->SetSizer(_conversationListSizer);
-
-        sidebarContentSizer->Add(_conversationList, 1, wxEXPAND);
-        _sidebarContent->SetSizer(sidebarContentSizer);
-        sidebarOuterSizer->Add(_sidebarContent, 1, wxEXPAND);
-
-        // Vertical border on the right edge
-        _sidebarBorder = new wxPanel(_sidebarPanel, wxID_ANY, wxDefaultPosition, wxSize(1, -1));
-        _sidebarBorder->SetBackgroundColour(m_appState->GetTheme().borderSubtle);
-        sidebarOuterSizer->Add(_sidebarBorder, 0, wxEXPAND);
-
-        _sidebarPanel->SetSizer(sidebarOuterSizer);
-        _sidebarPanel->Hide(); // Start collapsed
-        _contentSizer->Add(_sidebarPanel, 0, wxEXPAND);
+        // ── Sidebar (collapsible conversation list) ──
+        ConversationSidebar::Callbacks sidebarCallbacks;
+        sidebarCallbacks.onConversationClicked = [this](const std::string& path) {
+            LoadConversationFromPath(path);
+        };
+        sidebarCallbacks.onNewChatClicked = [this]() {
+            wxCommandEvent e;
+            OnNewChat(e);
+        };
+        sidebarCallbacks.onDeleteRequested = [this](const std::vector<std::string>& paths) {
+            DeleteConversations(paths);
+        };
+        m_sidebar = new ConversationSidebar(this, m_appState->GetTheme(),
+                                            sidebarCallbacks);
+        _contentSizer->Add(m_sidebar->GetPanel(), 0, wxEXPAND);
 
         // ── Right panel (chat display + input) ──
         _rightPanel = new wxPanel(this, wxID_ANY);
@@ -360,7 +344,6 @@ public:
         _settingsButton->Bind(wxEVT_BUTTON, &MyFrame::OnOpenSettings, this);
         _newChatButton->Bind(wxEVT_BUTTON, &MyFrame::OnNewChat, this);
         _sidebarToggle->Bind(wxEVT_BUTTON, &MyFrame::OnToggleSidebar, this);
-        _sidebarNewChat->Bind(wxEVT_BUTTON, &MyFrame::OnNewChat, this);
         Bind(wxEVT_ACTIVATE, &MyFrame::OnFrameActivate, this);
 
         Bind(wxEVT_ASSISTANT_DELTA, &MyFrame::OnAssistantDelta, this);
@@ -416,6 +399,7 @@ public:
         delete m_chatClient;
         delete m_chatDisplay;
         delete m_chatHistory;
+        delete m_sidebar;
         delete m_appState;
     }
 
@@ -432,7 +416,7 @@ public:
             m_chatClient->StopGeneration();
         }
 
-        if (!m_chatHistory->IsEmpty()) {
+        if (!m_chatHistory->IsEmpty() && !m_chatHistory->HasFilePath()) {
             AutoSaveConversation();
         }
 
@@ -490,17 +474,11 @@ private:
     wxPanel* _modelPill;
     wxPanel* _topSeparator;
     wxPanel* _rightPanel;
-    wxPanel* _sidebarContent;
-    wxPanel* _sidebarBorder;
     wxPanel* _inputContainer;
     wxPanel* _inputSeparator;
 
-    // Sidebar
-    wxPanel* _sidebarPanel;
-    wxButton* _sidebarNewChat;
-    wxScrolledWindow* _conversationList;
-    wxBoxSizer* _conversationListSizer;
-    bool m_sidebarVisible;
+    // Sidebar component
+    ConversationSidebar* m_sidebar;
     bool m_isClosing;
 
     // Top bar controls
@@ -536,9 +514,11 @@ private:
 
     // ─── Chat state machine ──────────────────────────────────────
     ChatState m_chatState;
+    TurnRoute m_currentTurnRoute = TurnRoute::GroupAll;
 
     // ─── Group chat state ────────────────────────────────────────
     std::string m_groupModelB;  // Empty = single mode, non-empty = group mode active
+    std::string m_directedTarget;  // Model being addressed in a GroupDirected turn
 
 
 
@@ -564,7 +544,7 @@ private:
         _sidebarToggle->SetFont(hamburgerFont);
         sizer->Add(_sidebarToggle, 0, wxALIGN_CENTER_VERTICAL | wxLEFT, 4);
 
-        _titleLabel = new wxStaticText(_toolbarPanel, wxID_ANY, "LlamaBoss");
+        _titleLabel = new wxStaticText(_toolbarPanel, wxID_ANY, "Ollama Chat");
         _titleLabel->SetForegroundColour(m_appState->GetTheme().textPrimary);
         wxFont titleFont = _titleLabel->GetFont();
         titleFont.SetPointSize(15);
@@ -641,7 +621,7 @@ private:
             wxDefaultPosition, wxSize(48, 44), wxBORDER_NONE);
         _aboutButton->SetBackgroundColour(m_appState->GetTheme().bgToolbar);
         _aboutButton->SetForegroundColour(m_appState->GetTheme().textMuted);
-        _aboutButton->SetToolTip("About LlamaBoss");
+        _aboutButton->SetToolTip("About OpenChat");
         wxFont aboutFont = _aboutButton->GetFont();
         aboutFont.SetPointSize(18);
         _aboutButton->SetFont(aboutFont);
@@ -749,12 +729,9 @@ private:
         UpdateGroupToggleButton();  // Sets foreground color based on state
 
         // ── Sidebar ──────────────────────────────────────────────
-        _sidebarPanel->SetBackgroundColour(t.bgSidebar);
-        _sidebarContent->SetBackgroundColour(t.bgSidebar);
-        _sidebarNewChat->SetBackgroundColour(t.modelPillBg);
-        _sidebarNewChat->SetForegroundColour(t.textPrimary);
-        _conversationList->SetBackgroundColour(t.bgSidebar);
-        _sidebarBorder->SetBackgroundColour(t.borderSubtle);
+        if (m_sidebar) {
+            m_sidebar->ApplyTheme(t);
+        }
 
         // ── Chat area ────────────────────────────────────────────
         _rightPanel->SetBackgroundColour(t.bgMain);
@@ -781,8 +758,8 @@ private:
         }
 
         // ── Refresh sidebar if visible ───────────────────────────
-        if (m_sidebarVisible) {
-            RefreshConversationList();
+        if (m_sidebar && m_sidebar->IsVisible()) {
+            m_sidebar->Refresh(m_chatHistory->GetFilePath());
         }
 
         // ── Force repaint ────────────────────────────────────────
@@ -910,6 +887,101 @@ private:
         return models;
     }
 
+    static std::string ToLowerAscii(std::string s)
+    {
+        std::transform(s.begin(), s.end(), s.begin(),
+            [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+        return s;
+    }
+
+    static std::string TrimLeftAscii(const std::string& s)
+    {
+        size_t i = 0;
+        while (i < s.size() && std::isspace(static_cast<unsigned char>(s[i]))) {
+            ++i;
+        }
+        return s.substr(i);
+    }
+
+    static std::vector<std::string> BuildAddressTokens(const std::string& modelName)
+    {
+        std::vector<std::string> tokens;
+
+        auto addUnique = [&](std::string token) {
+            token = ToLowerAscii(token);
+            if (token.empty()) return;
+            if (std::find(tokens.begin(), tokens.end(), token) == tokens.end()) {
+                tokens.push_back(token);
+            }
+            };
+
+        addUnique(modelName);
+
+        size_t colon = modelName.find(':');
+        if (colon != std::string::npos) {
+            addUnique(modelName.substr(0, colon));
+        }
+
+        // Friendly alias: leading letters only (e.g. "gemma" from "gemma4:..."
+        // and "qwen" from "qwen3.5:latest")
+        std::string lettersOnly;
+        for (char ch : modelName) {
+            unsigned char c = static_cast<unsigned char>(ch);
+            if (std::isalpha(c)) {
+                lettersOnly.push_back(static_cast<char>(std::tolower(c)));
+            }
+            else if (!lettersOnly.empty()) {
+                break;
+            }
+        }
+        addUnique(lettersOnly);
+
+        return tokens;
+    }
+
+    static bool StartsWithAddressToken(const std::string& rawText, const std::string& token)
+    {
+        if (token.empty()) return false;
+
+        std::string s = ToLowerAscii(TrimLeftAscii(rawText));
+        if (!s.empty() && s[0] == '@') {
+            s.erase(0, 1);
+        }
+
+        if (s.size() < token.size()) return false;
+        if (s.compare(0, token.size(), token) != 0) return false;
+
+        if (s.size() == token.size()) return true;
+
+        unsigned char next = static_cast<unsigned char>(s[token.size()]);
+        return std::isspace(next) || next == ':' || next == ',' || next == '.' ||
+            next == '?' || next == '!' || next == '-' || next == ';';
+    }
+
+    TurnRoute ParseTurnRoute(const std::string& rawInput) const
+    {
+        if (!IsGroupMode()) {
+            return TurnRoute::GroupAll;
+        }
+
+        const std::string modelA = m_appState->GetModel();
+        const std::string modelB = m_groupModelB;
+
+        for (const auto& token : BuildAddressTokens(modelB)) {
+            if (StartsWithAddressToken(rawInput, token)) {
+                return TurnRoute::DirectModelB;
+            }
+        }
+
+        for (const auto& token : BuildAddressTokens(modelA)) {
+            if (StartsWithAddressToken(rawInput, token)) {
+                return TurnRoute::DirectModelA;
+            }
+        }
+
+        return TurnRoute::GroupAll;
+    }
+
     // ═════════════════════════════════════════════════════════════
     //  EVENT HANDLERS
     // ═════════════════════════════════════════════════════════════
@@ -936,7 +1008,14 @@ private:
         // [STEP 2] Drop stale events from a cancelled/previous generation
         if (static_cast<uint64_t>(event.GetExtraLong()) != m_generationId) return;
 
-        m_chatDisplay->DisplayAssistantDelta(event.GetString().ToStdString());
+        std::string delta = WxToUtf8(event.GetString());
+
+        // Persist streamed content as it arrives so switching chats or autosave
+        // does not lose the assistant response if the final completion event fails.
+        m_chatHistory->AppendToLastAssistantMessage(delta);
+
+        // Still render to the UI normally
+        m_chatDisplay->DisplayAssistantDelta(delta);
     }
 
 
@@ -944,30 +1023,35 @@ private:
     {
         if (m_isClosing) return;
 
-        // Drop stale events from a cancelled/previous generation
         if (static_cast<uint64_t>(event.GetExtraLong()) != m_generationId) return;
 
-        std::string fullResponse = event.GetString().ToStdString();
+        std::string fullResponse = WxToUtf8(event.GetString());
 
         m_chatDisplay->DisplayAssistantComplete();
-        m_chatHistory->UpdateLastAssistantMessage(fullResponse);
+
+        if (!fullResponse.empty()) {
+            m_chatHistory->UpdateLastAssistantMessage(fullResponse);
+        }
+        else if (auto* logger = m_appState->GetLogger()) {
+            logger->warning("Assistant complete event arrived empty; keeping streamed assistant content");
+        }
+
         m_chatClient->ResetStreamingState();
 
-        if (m_chatState == ChatState::GroupModelA) {
-            // ─── Transition: Model A done → fire Model B ──────────────
+        const bool shouldStartModelB =
+            (m_chatState == ChatState::GroupModelA) &&
+            IsGroupMode() &&
+            (m_currentTurnRoute == TurnRoute::GroupAll);
+
+        if (shouldStartModelB) {
             std::string modelA = m_appState->GetModel();
             std::string modelB = m_groupModelB;
 
             if (auto* logger = m_appState->GetLogger())
                 logger->information("Group chat: " + modelA + " done, starting " + modelB);
 
-            // Build Model B's context using the group chat builder.
-            // At this point, history contains: [..., user msg, modelA assistant msg]
-            // BuildGroupChatRequestJson will rewrite modelA's messages as user
-            // messages with [modelA]: prefix, and keep modelB's own as assistant.
             std::string body = m_chatHistory->BuildGroupChatRequestJson(modelB, modelA, true);
 
-            // Add placeholder for Model B's response
             m_chatHistory->AddAssistantPlaceholder(modelB);
             m_chatDisplay->DisplayAssistantPrefix(modelB, GetModelAccentColor(modelB));
 
@@ -979,14 +1063,17 @@ private:
                 m_chatDisplay->DisplaySystemMessage("Failed to start " + modelB + " request");
                 m_chatHistory->RemoveLastAssistantMessage();
                 SetStreamingState(false);
-                // Model A's response is still in history — save it
                 AutoSaveConversation();
+                m_currentTurnRoute = TurnRoute::GroupAll;
             }
         }
         else {
-            // SingleStreaming or GroupModelB done — back to idle
             SetStreamingState(false);
             AutoSaveConversation();
+            m_currentTurnRoute = TurnRoute::GroupAll;
+
+            m_chatDisplay->Clear();
+            ReplayConversation();
 
             if (auto* logger = m_appState->GetLogger())
                 logger->information("Chat response completed");
@@ -1007,6 +1094,9 @@ private:
         std::string failedModel = m_appState->GetModel();
         if (m_chatState == ChatState::GroupModelB) {
             failedModel = m_groupModelB;
+        }
+        else if (m_chatState == ChatState::GroupDirected) {
+            failedModel = m_directedTarget;
         }
 
         std::string friendly;
@@ -1037,14 +1127,19 @@ private:
         }
 
         // In group mode, prefix the error with the model name for clarity
-        if (m_chatState == ChatState::GroupModelB) {
+        if (m_chatState == ChatState::GroupModelB ||
+            m_chatState == ChatState::GroupDirected) {
             friendly = "[" + failedModel + "] " + friendly;
         }
 
         m_chatDisplay->DisplaySystemMessage(friendly);
-        m_chatHistory->RemoveLastAssistantMessage();
+        if (m_chatHistory->HasAssistantPlaceholder()) {
+            m_chatHistory->RemoveLastAssistantMessage();
+        }
         m_chatClient->ResetStreamingState();
         SetStreamingState(false);
+
+        m_currentTurnRoute = TurnRoute::GroupAll;
 
         // If Model B failed, Model A's response is still in history — save it
         if (!m_chatHistory->IsEmpty()) AutoSaveConversation();
@@ -1055,11 +1150,10 @@ private:
 
     void OnToggleSidebar(wxCommandEvent&)
     {
-        m_sidebarVisible = !m_sidebarVisible;
-        _sidebarPanel->Show(m_sidebarVisible);
+        m_sidebar->Toggle();
 
-        if (m_sidebarVisible) {
-            RefreshConversationList();
+        if (m_sidebar->IsVisible()) {
+            m_sidebar->Refresh(m_chatHistory->GetFilePath());
         }
 
         _contentSizer->Layout();
@@ -1076,8 +1170,12 @@ private:
             m_chatClient->StopGeneration();
             m_chatDisplay->DisplayAssistantComplete();
             m_chatDisplay->DisplaySystemMessage("Generation stopped by user");
-            m_chatHistory->RemoveLastAssistantMessage();
+            if (m_chatHistory->HasAssistantPlaceholder()) {
+                m_chatHistory->RemoveLastAssistantMessage();
+            }
             SetStreamingState(false);
+
+            m_currentTurnRoute = TurnRoute::GroupAll;
 
             // Auto-save: if Model A completed but Model B was stopped,
             // Model A's response is still in history and worth saving.
@@ -1143,13 +1241,13 @@ private:
     void OnAbout(wxCommandEvent&)
     {
         wxString msg;
-        msg << "LlamaBoss v" << OPENCHAT_VERSION << "\n\n"
+        msg << "OpenChat v" << OPENCHAT_VERSION << "\n\n"
             << "A native desktop chat client for Ollama.\n\n"
             << "Built with wxWidgets + Poco\n"
             << "License: MIT\n\n"
             << wxString::FromUTF8("Model: ") << wxString::FromUTF8(m_appState->GetModel()) << "\n"
             << wxString::FromUTF8("API: ") << wxString::FromUTF8(m_appState->GetApiUrl());
-        wxMessageBox(msg, "About LlamaBoss", wxOK | wxICON_INFORMATION);
+        wxMessageBox(msg, "About OpenChat", wxOK | wxICON_INFORMATION);
     }
 
     // ─── Model pill click → fetch model list and show picker ─────
@@ -1345,7 +1443,8 @@ private:
         UpdateModelLabel();
         UpdateGroupToggleButton();
         UpdateWindowTitle();
-        RefreshConversationList();
+        if (m_sidebar->IsVisible())
+            m_sidebar->Refresh(m_chatHistory->GetFilePath());
         _userInputCtrl->SetFocus();
 
         if (auto* logger = m_appState->GetLogger())
@@ -1400,7 +1499,7 @@ private:
         if (IsBusy()) return;
 
         // Save current conversation before loading a new one
-        if (!m_chatHistory->IsEmpty()) {
+        if (!m_chatHistory->IsEmpty() && !m_chatHistory->HasFilePath()) {
             AutoSaveConversation();
         }
 
@@ -1460,7 +1559,8 @@ private:
 
         if (m_chatHistory->SaveToFile("", GetActiveModels())) {
             UpdateWindowTitle();
-            if (m_sidebarVisible) RefreshConversationList();
+            if (m_sidebar->IsVisible())
+                m_sidebar->Refresh(m_chatHistory->GetFilePath());
             if (auto* logger = m_appState->GetLogger())
                 logger->debug("Auto-saved conversation: " + m_chatHistory->GetFilePath());
         }
@@ -1468,7 +1568,7 @@ private:
 
     void UpdateWindowTitle()
     {
-        std::string title = "LlamaBoss";
+        std::string title = "Ollama Chat";
         if (!m_chatHistory->IsEmpty()) {
             std::string convTitle = m_chatHistory->GetTitle();
             if (convTitle.empty()) {
@@ -1479,7 +1579,7 @@ private:
                 if (convTitle.size() > 40) {
                     convTitle = convTitle.substr(0, 37) + "...";
                 }
-                title = convTitle + " - LlamaBoss";
+                title = convTitle + " - Ollama Chat";
             }
         }
         SetTitle(wxString::FromUTF8(title));
@@ -1495,194 +1595,23 @@ private:
             if (content.empty()) continue;
 
             if (role == "user") {
-                m_chatDisplay->DisplayUserMessage(content);
+                std::string target = ChatHistory::GetMessageTarget(msg);
+                m_chatDisplay->DisplayUserMessage(content, target);
             }
             else if (role == "assistant") {
                 // Read per-message model tag; fall back to primary model
                 std::string msgModel = ChatHistory::GetMessageModel(msg);
                 if (msgModel.empty()) msgModel = m_appState->GetModel();
-                m_chatDisplay->DisplayAssistantPrefix(msgModel, GetModelAccentColor(msgModel));
-                m_chatDisplay->DisplayAssistantDelta(content);
-                m_chatDisplay->DisplayAssistantComplete();
+                m_chatDisplay->DisplayAssistantMessage(
+                    msgModel,
+                    content,
+                    GetModelAccentColor(msgModel)
+                );
             }
             else if (role == "system") {
                 m_chatDisplay->DisplaySystemMessage(content);
             }
         }
-    }
-
-    // ═════════════════════════════════════════════════════════════
-    //  CONVERSATION LIST
-    // ═════════════════════════════════════════════════════════════
-
-    struct ConversationEntry {
-        std::string filePath;
-        std::string title;
-        wxDateTime modTime;
-    };
-
-    void RefreshConversationList()
-    {
-        if (!_conversationListSizer) return;
-
-        // Clear existing entries
-        _conversationListSizer->Clear(true);
-
-        // Scan conversations directory
-        std::string convDir = ChatHistory::GetConversationsDir();
-        wxDir dir(wxString::FromUTF8(convDir));
-        if (!dir.IsOpened()) return;
-
-        // Collect all conversation files with metadata
-        std::vector<ConversationEntry> entries;
-
-        wxString filename;
-        bool found = dir.GetFirst(&filename, "*.json", wxDIR_FILES);
-        while (found) {
-            wxString fullPath = wxString::FromUTF8(convDir) +
-                wxFileName::GetPathSeparator() + filename;
-
-            ConversationEntry entry;
-            entry.filePath = fullPath.ToStdString();
-
-            // Read the title from the JSON file
-            try {
-                std::ifstream file(entry.filePath);
-                if (file.is_open()) {
-                    std::string content((std::istreambuf_iterator<char>(file)),
-                        std::istreambuf_iterator<char>());
-                    file.close();
-
-                    Poco::JSON::Parser parser;
-                    auto result = parser.parse(content);
-                    auto obj = result.extract<Poco::JSON::Object::Ptr>();
-
-                    if (obj->has("title")) {
-                        entry.title = obj->getValue<std::string>("title");
-                    }
-                }
-            }
-            catch (...) {
-                // Skip files we can't parse
-            }
-
-            if (entry.title.empty()) {
-                entry.title = filename.ToStdString();
-            }
-
-            // Get file modification time
-            wxFileName fn(fullPath);
-            fn.GetTimes(nullptr, &entry.modTime, nullptr);
-
-            entries.push_back(entry);
-            found = dir.GetNext(&filename);
-        }
-
-        // Sort by modification time, newest first
-        std::sort(entries.begin(), entries.end(),
-            [](const ConversationEntry& a, const ConversationEntry& b) {
-                return a.modTime.IsLaterThan(b.modTime);
-            });
-
-        // Create UI entries
-        for (const auto& entry : entries) {
-            auto* panel = new wxPanel(_conversationList, wxID_ANY);
-
-            // Highlight the active conversation
-            bool isActive = (entry.filePath == m_chatHistory->GetFilePath());
-            panel->SetBackgroundColour(isActive ?
-                m_appState->GetTheme().modelPillBg : m_appState->GetTheme().bgSidebar);
-
-            auto* panelSizer = new wxBoxSizer(wxVERTICAL);
-
-            // Title (truncated)
-            std::string displayTitle = entry.title;
-            if (displayTitle.size() > 35) {
-                displayTitle = displayTitle.substr(0, 32) + "...";
-            }
-            auto* titleLabel = new wxStaticText(panel, wxID_ANY,
-                wxString::FromUTF8(displayTitle));
-            titleLabel->SetForegroundColour(m_appState->GetTheme().textPrimary);
-            wxFont titleFont = titleLabel->GetFont();
-            titleFont.SetPointSize(10);
-            titleLabel->SetFont(titleFont);
-            panelSizer->Add(titleLabel, 0, wxLEFT | wxRIGHT | wxTOP, 8);
-
-            // Relative time
-            std::string timeStr = RelativeTimeString(entry.modTime);
-            auto* timeLabel = new wxStaticText(panel, wxID_ANY,
-                wxString::FromUTF8(timeStr));
-            timeLabel->SetForegroundColour(m_appState->GetTheme().textMuted);
-            wxFont timeFont = timeLabel->GetFont();
-            timeFont.SetPointSize(9);
-            timeLabel->SetFont(timeFont);
-            panelSizer->Add(timeLabel, 0, wxLEFT | wxRIGHT | wxBOTTOM, 8);
-
-            panel->SetSizer(panelSizer);
-
-            // Store file path in the panel name for click handling
-            panel->SetName(wxString::FromUTF8(entry.filePath));
-
-            // Bind click events on the panel and its children
-            auto clickHandler = [this](wxMouseEvent& evt) {
-                wxWindow* win = dynamic_cast<wxWindow*>(evt.GetEventObject());
-                // Walk up to find the panel with the path stored in name
-                while (win && win != _conversationList) {
-                    wxString name = win->GetName();
-                    if (name.EndsWith(".json")) {
-                        LoadConversationFromPath(name.ToStdString());
-                        return;
-                    }
-                    win = win->GetParent();
-                }
-                };
-
-            panel->Bind(wxEVT_LEFT_UP, clickHandler);
-            titleLabel->Bind(wxEVT_LEFT_UP, clickHandler);
-            timeLabel->Bind(wxEVT_LEFT_UP, clickHandler);
-
-            // Right-click context menu for delete
-            auto rightClickHandler = [this](wxMouseEvent& evt) {
-                wxWindow* win = dynamic_cast<wxWindow*>(evt.GetEventObject());
-                std::string path;
-                while (win && win != _conversationList) {
-                    wxString name = win->GetName();
-                    if (name.EndsWith(".json")) {
-                        path = name.ToStdString();
-                        break;
-                    }
-                    win = win->GetParent();
-                }
-                if (!path.empty()) {
-                    ShowConversationContextMenu(path);
-                }
-                };
-
-            panel->Bind(wxEVT_RIGHT_UP, rightClickHandler);
-            titleLabel->Bind(wxEVT_RIGHT_UP, rightClickHandler);
-            timeLabel->Bind(wxEVT_RIGHT_UP, rightClickHandler);
-
-            // Hover effect
-            auto enterHandler = [panel, this](wxMouseEvent&) {
-                if (panel->GetBackgroundColour() != m_appState->GetTheme().modelPillBg) {
-                    panel->SetBackgroundColour(m_appState->GetTheme().sidebarHover);
-                    panel->Refresh();
-                }
-                };
-            auto leaveHandler = [panel, this](wxMouseEvent&) {
-                if (panel->GetBackgroundColour() != m_appState->GetTheme().modelPillBg) {
-                    panel->SetBackgroundColour(m_appState->GetTheme().bgSidebar);
-                    panel->Refresh();
-                }
-                };
-            panel->Bind(wxEVT_ENTER_WINDOW, enterHandler);
-            panel->Bind(wxEVT_LEAVE_WINDOW, leaveHandler);
-
-            _conversationListSizer->Add(panel, 0, wxEXPAND);
-        }
-
-        _conversationList->FitInside();
-        _conversationList->Layout();
     }
 
     void AutoLoadLastConversation()
@@ -1723,7 +1652,7 @@ private:
         if (IsBusy()) return false;
 
         // Save current conversation before loading
-        if (!m_chatHistory->IsEmpty()) {
+        if (!m_chatHistory->IsEmpty() && !m_chatHistory->HasFilePath()) {
             AutoSaveConversation();
         }
 
@@ -1755,7 +1684,8 @@ private:
         ClearPendingImage();
         ReplayConversation();
         UpdateWindowTitle();
-        RefreshConversationList();
+        if (m_sidebar->IsVisible())
+            m_sidebar->Refresh(m_chatHistory->GetFilePath());
         _userInputCtrl->SetFocus();
 
         if (auto* logger = m_appState->GetLogger())
@@ -1764,69 +1694,62 @@ private:
         return true;
     }
 
-    static std::string RelativeTimeString(const wxDateTime& dt)
+    static std::string WxToUtf8(const wxString& s)
     {
-        if (!dt.IsValid()) return "";
-
-        wxDateTime now = wxDateTime::Now();
-        wxTimeSpan diff = now.Subtract(dt);
-
-        int minutes = (int)diff.GetMinutes();
-        if (minutes < 1) return "Just now";
-        if (minutes < 60) return std::to_string(minutes) + " min ago";
-
-        int hours = (int)diff.GetHours();
-        if (hours < 24) return std::to_string(hours) + "h ago";
-
-        int days = diff.GetDays();
-        if (days == 1) return "Yesterday";
-        if (days < 7) return std::to_string(days) + " days ago";
-        if (days < 30) return std::to_string(days / 7) + "w ago";
-
-        return dt.Format("%b %d").ToStdString();
+        wxScopedCharBuffer buf = s.ToUTF8();
+        if (!buf) return std::string();
+        return std::string(buf.data());
     }
 
-    void ShowConversationContextMenu(const std::string& filePath)
+    void DeleteConversations(const std::vector<std::string>& filePaths)
     {
-        wxMenu menu;
-        menu.Append(wxID_DELETE, "Delete conversation");
+        if (filePaths.empty()) return;
 
-        menu.Bind(wxEVT_MENU, [this, filePath](wxCommandEvent&) {
-            DeleteConversation(filePath);
-            }, wxID_DELETE);
+        // Build confirmation message
+        wxString msg;
+        if (filePaths.size() == 1)
+            msg = "Delete this conversation? This cannot be undone.";
+        else
+            msg = wxString::Format("Delete %zu conversations? This cannot be undone.",
+                                   filePaths.size());
 
-        PopupMenu(&menu);
-    }
-
-    void DeleteConversation(const std::string& filePath)
-    {
-        int result = wxMessageBox(
-            "Delete this conversation? This cannot be undone.",
-            "Delete Conversation",
+        int result = wxMessageBox(msg, "Delete Conversation",
             wxYES_NO | wxICON_WARNING);
-
         if (result != wxYES) return;
 
-        // If deleting the currently active conversation, clear the display
-        bool wasActive = (filePath == m_chatHistory->GetFilePath());
+        bool clearedActive = false;
+        int deleted = 0;
 
-        // Delete the file
-        if (wxRemoveFile(wxString::FromUTF8(filePath))) {
-            if (wasActive) {
-                m_chatHistory->Clear();
-                m_chatDisplay->Clear();
-                ClearPendingImage();
-                UpdateWindowTitle();
+        for (const auto& filePath : filePaths) {
+            if (wxRemoveFile(wxString::FromUTF8(filePath))) {
+                ++deleted;
+
+                // If deleting the currently active conversation, clear the display
+                if (!clearedActive && filePath == m_chatHistory->GetFilePath()) {
+                    m_chatHistory->Clear();
+                    m_chatDisplay->Clear();
+                    ClearPendingImage();
+                    UpdateWindowTitle();
+                    clearedActive = true;
+                }
+
+                if (auto* logger = m_appState->GetLogger())
+                    logger->information("Deleted conversation: " + filePath);
             }
-
-            RefreshConversationList();
-
-            if (auto* logger = m_appState->GetLogger())
-                logger->information("Deleted conversation: " + filePath);
         }
-        else {
-            wxMessageBox("Failed to delete conversation file", "Error",
-                wxOK | wxICON_ERROR);
+
+        if (deleted > 0) {
+            m_sidebar->ClearSelection();
+            if (m_sidebar->IsVisible())
+                m_sidebar->Refresh(m_chatHistory->GetFilePath());
+        }
+
+        if (deleted < (int)filePaths.size()) {
+            wxMessageBox(
+                wxString::Format("Failed to delete %d of %zu files.",
+                                 (int)filePaths.size() - deleted,
+                                 filePaths.size()),
+                "Error", wxOK | wxICON_ERROR);
         }
     }
 
@@ -1949,11 +1872,14 @@ private:
     {
         if (IsBusy()) return;
 
-        std::string userInput = _userInputCtrl->GetValue().ToStdString();
+        std::string userInput = WxToUtf8(_userInputCtrl->GetValue());
         if (userInput.empty() && m_pendingImageBase64.empty()) return;
 
         if (userInput.empty() && !m_pendingImageBase64.empty())
             userInput = "What is in this image?";
+
+        // Decide routing before dispatch.
+        m_currentTurnRoute = ParseTurnRoute(userInput);
 
         if (!m_pendingImageBase64.empty())
             m_chatDisplay->DisplayUserMessage("[" + m_pendingImageName + "] " + userInput);
@@ -1963,10 +1889,33 @@ private:
         _userInputCtrl->Clear();
         { wxCommandEvent e(wxEVT_TEXT, _userInputCtrl->GetId()); OnUserInputChanged(e); }
 
+        // Keep the raw user text in history so the transcript stays faithful.
         m_chatHistory->AddUserMessage(userInput);
 
         std::string modelA = m_appState->GetModel();
-        std::string body = m_chatHistory->BuildChatRequestJson(modelA, true);
+        std::string targetModel = modelA;
+        std::string body;
+
+        if (IsGroupMode()) {
+            switch (m_currentTurnRoute) {
+            case TurnRoute::DirectModelB:
+                targetModel = m_groupModelB;
+                break;
+            case TurnRoute::DirectModelA:
+            case TurnRoute::GroupAll:
+            default:
+                targetModel = modelA;
+                break;
+            }
+
+            // In multi-model mode, always build a participant-aware request so
+            // the target model does not mistake the other model's messages as its own.
+            body = m_chatHistory->BuildParticipantChatRequestJson(targetModel, true);
+        }
+        else {
+            m_currentTurnRoute = TurnRoute::GroupAll;
+            body = m_chatHistory->BuildChatRequestJson(targetModel, true);
+        }
 
         if (!m_pendingImageBase64.empty()) {
             body = InjectImageIntoRequest(body, m_pendingImageBase64);
@@ -1976,25 +1925,31 @@ private:
         if (auto* logger = m_appState->GetLogger())
             logger->debug("Request sent (" + std::to_string(body.size()) + " bytes)");
 
-        m_chatHistory->AddAssistantPlaceholder(modelA);
-        m_chatDisplay->DisplayAssistantPrefix(modelA, GetModelAccentColor(modelA));
+        m_chatHistory->AddAssistantPlaceholder(targetModel);
+        m_chatDisplay->DisplayAssistantPrefix(targetModel, GetModelAccentColor(targetModel));
 
-        // New generation — bump ID so any leftover events from
-        // a previous (interrupted) request are discarded by the handlers.
         ++m_generationId;
 
-        // Set state BEFORE SetStreamingState(true) because SetStreamingState(false)
-        // resets m_chatState to Idle — we don't want the true path to clobber it.
-        m_chatState = IsGroupMode() ? ChatState::GroupModelA : ChatState::SingleStreaming;
+        if (!IsGroupMode()) {
+            m_chatState = ChatState::SingleStreaming;
+        }
+        else if (m_currentTurnRoute == TurnRoute::DirectModelB) {
+            m_chatState = ChatState::GroupModelB;
+        }
+        else {
+            // GroupAll and DirectModelA both start with Model A.
+            m_chatState = ChatState::GroupModelA;
+        }
+
         SetStreamingState(true);
 
-        if (!m_chatClient->SendMessage(modelA, m_appState->GetApiUrl(),
+        if (!m_chatClient->SendMessage(targetModel, m_appState->GetApiUrl(),
             body, m_generationId)) {
             SetStreamingState(false);
             m_chatDisplay->DisplaySystemMessage("Failed to start chat request");
             m_chatHistory->RemoveLastAssistantMessage();
+            m_currentTurnRoute = TurnRoute::GroupAll;
         }
-
     }
 };
 

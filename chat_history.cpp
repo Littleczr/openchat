@@ -39,9 +39,13 @@ Poco::JSON::Object::Ptr ChatHistory::CreateMessage(const std::string& role,
     return msg;
 }
 
-void ChatHistory::AddUserMessage(const std::string& content)
+void ChatHistory::AddUserMessage(const std::string& content, const std::string& target)
 {
-    m_messages.push_back(CreateMessage("user", content));
+    auto msg = CreateMessage("user", content);
+    if (!target.empty()) {
+        msg->set("target", target);
+    }
+    m_messages.push_back(msg);
 }
 
 void ChatHistory::AddAssistantMessage(const std::string& content, const std::string& model)
@@ -77,13 +81,23 @@ bool ChatHistory::IsEmpty() const
 //  API Request Builders
 // ═══════════════════════════════════════════════════════════════════
 
-std::string ChatHistory::BuildChatRequestJson(const std::string& model, bool stream) const
+std::string ChatHistory::BuildChatRequestJson(const std::string& model, bool stream,
+                                               const std::string& systemPrompt) const
 {
     Poco::JSON::Object::Ptr root = new Poco::JSON::Object;
     root->set("model", model);
     root->set("stream", stream);
 
     Poco::JSON::Array::Ptr messagesArray = new Poco::JSON::Array;
+
+    // Prepend system prompt if provided
+    if (!systemPrompt.empty()) {
+        Poco::JSON::Object::Ptr sysMsg = new Poco::JSON::Object;
+        sysMsg->set("role", "system");
+        sysMsg->set("content", systemPrompt);
+        messagesArray->add(sysMsg);
+    }
+
     for (const auto& msg : m_messages) {
         // Skip empty messages (e.g. the assistant placeholder added before streaming)
         std::string content = msg->getValue<std::string>("content");
@@ -101,9 +115,69 @@ std::string ChatHistory::BuildChatRequestJson(const std::string& model, bool str
     return oss.str();
 }
 
+std::string ChatHistory::BuildParticipantChatRequestJson(const std::string& targetModel,
+    bool stream) const
+{
+    Poco::JSON::Object::Ptr root = new Poco::JSON::Object;
+    root->set("model", targetModel);
+    root->set("stream", stream);
+
+    Poco::JSON::Array::Ptr messagesArray = new Poco::JSON::Array;
+
+    // Group-aware system prompt for directed or first-speaker turns.
+    Poco::JSON::Object::Ptr sysMsg = new Poco::JSON::Object;
+    sysMsg->set("role", "system");
+    sysMsg->set("content",
+        "You are participating in a group chat with the user and one or more AI assistants. "
+        "The user's messages are from the human. Messages prefixed with [name] are from other AI assistants. "
+        "Reply only as yourself, and do not speak for the other assistants.");
+    messagesArray->add(sysMsg);
+
+    for (const auto& msg : m_messages) {
+        std::string content = msg->getValue<std::string>("content");
+        if (content.empty()) continue;
+
+        std::string role = msg->getValue<std::string>("role");
+
+        if (role == "assistant") {
+            std::string msgModel = GetMessageModel(msg);
+
+            Poco::JSON::Object::Ptr wireMsg = new Poco::JSON::Object;
+
+            if (msgModel.empty() || msgModel == targetModel) {
+                // Keep this model's own prior assistant messages as assistant.
+                wireMsg->set("role", "assistant");
+                wireMsg->set("content", content);
+            }
+            else {
+                // Rewrite other models' assistant messages as user messages
+                // so the target model does not think it authored them.
+                wireMsg->set("role", "user");
+                wireMsg->set("content", "[" + msgModel + "]: " + content);
+            }
+
+            messagesArray->add(wireMsg);
+        }
+        else {
+            // user / system pass through unchanged
+            Poco::JSON::Object::Ptr wireMsg = new Poco::JSON::Object;
+            wireMsg->set("role", role);
+            wireMsg->set("content", content);
+            messagesArray->add(wireMsg);
+        }
+    }
+
+    root->set("messages", messagesArray);
+
+    std::ostringstream oss;
+    Poco::JSON::Stringifier::stringify(root, oss);
+    return oss.str();
+}
+
 std::string ChatHistory::BuildGroupChatRequestJson(const std::string& targetModel,
                                                     const std::string& peerModelName,
-                                                    bool stream) const
+                                                    bool stream,
+                                                    const std::string& systemPrompt) const
 {
     // Build a request body for the "target" model (Model B) in a group chat.
     //
@@ -121,15 +195,19 @@ std::string ChatHistory::BuildGroupChatRequestJson(const std::string& targetMode
 
     Poco::JSON::Array::Ptr messagesArray = new Poco::JSON::Array;
 
-    // System prompt for group chat awareness
+    // System prompt: use caller-provided if available, otherwise default
+    std::string prompt = systemPrompt;
+    if (prompt.empty()) {
+        prompt = "You are in a group chat with the user and another AI assistant named '"
+            + peerModelName + "'. The user's messages are from the human. Messages "
+            "prefixed with [" + peerModelName + "] are from the other AI. "
+            "Respond naturally to the user \xe2\x80\x94 you may agree with, disagree with, "
+            "or build upon what " + peerModelName + " said.";
+    }
+
     Poco::JSON::Object::Ptr sysMsg = new Poco::JSON::Object;
     sysMsg->set("role", "system");
-    sysMsg->set("content",
-        "You are in a group chat with the user and another AI assistant named '"
-        + peerModelName + "'. The user's messages are from the human. Messages "
-        "prefixed with [" + peerModelName + "] are from the other AI. "
-        "Respond naturally to the user \xe2\x80\x94 you may agree with, disagree with, "
-        "or build upon what " + peerModelName + " said.");
+    sysMsg->set("content", prompt);
     messagesArray->add(sysMsg);
 
     for (const auto& msg : m_messages) {
@@ -179,6 +257,16 @@ void ChatHistory::AddAssistantPlaceholder(const std::string& model)
     AddAssistantMessage("", model);
 }
 
+void ChatHistory::AppendToLastAssistantMessage(const std::string& delta)
+{
+    if (delta.empty()) return;
+
+    if (!m_messages.empty() && IsLastMessageRole("assistant")) {
+        std::string current = m_messages.back()->getValue<std::string>("content");
+        m_messages.back()->set("content", current + delta);
+    }
+}
+
 void ChatHistory::UpdateLastAssistantMessage(const std::string& content)
 {
     if (!m_messages.empty() && IsLastMessageRole("assistant")) {
@@ -214,6 +302,14 @@ std::string ChatHistory::GetMessageModel(const Poco::JSON::Object::Ptr& msg)
 {
     if (msg && msg->has("model")) {
         return msg->getValue<std::string>("model");
+    }
+    return "";
+}
+
+std::string ChatHistory::GetMessageTarget(const Poco::JSON::Object::Ptr& msg)
+{
+    if (msg && msg->has("target")) {
+        return msg->getValue<std::string>("target");
     }
     return "";
 }
@@ -300,6 +396,10 @@ bool ChatHistory::SaveToFile(const std::string& filePath, const std::vector<std:
                 if (!msgModel.empty()) {
                     saveMsg->set("model", msgModel);
                 }
+                std::string msgTarget = GetMessageTarget(msg);
+                if (!msgTarget.empty()) {
+                    saveMsg->set("target", msgTarget);
+                }
                 messagesArray->add(saveMsg);
             }
         }
@@ -379,7 +479,11 @@ bool ChatHistory::LoadFromFile(const std::string& filePath, std::vector<std::str
                 if (msgObj->has("model")) {
                     msgModel = msgObj->getValue<std::string>("model");
                 }
-                m_messages.push_back(CreateMessage(role, msgContent, msgModel));
+                auto loadedMsg = CreateMessage(role, msgContent, msgModel);
+                if (msgObj->has("target")) {
+                    loadedMsg->set("target", msgObj->getValue<std::string>("target"));
+                }
+                m_messages.push_back(loadedMsg);
             }
         }
 

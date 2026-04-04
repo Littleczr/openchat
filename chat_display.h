@@ -21,12 +21,17 @@ public:
     ~ChatDisplay();
 
     // Display different types of messages
-    void DisplayUserMessage(const std::string& text);
+    // target: if non-empty, shows "You → target:" instead of "You:"
+    void DisplayUserMessage(const std::string& text,
+                            const std::string& target = "");
     void DisplaySystemMessage(const std::string& text);
     void DisplayAssistantPrefix(const std::string& modelName);
     void DisplayAssistantPrefix(const std::string& modelName, const wxColour& accentColor);
     void DisplayAssistantDelta(const std::string& delta);
     void DisplayAssistantComplete();
+    void DisplayAssistantMessage(const std::string& modelName,
+        const std::string& content,
+        const wxColour& accentColor);
 
     // Utility methods
     void Clear();
@@ -53,9 +58,10 @@ private:
     wxColour m_thoughtColor;
 
     // State tracking for assistant messages
-    bool m_isInThoughtBlock;      // True if we are currently printing thought text
-    bool m_isFirstAssistantDelta; // True for the very first chunk of an assistant message
-    wxColour m_activeAssistantColor; // Color used for the current streaming response
+    bool m_isInThoughtBlock;            // True if we are currently printing thought text
+    bool m_isFirstAssistantDelta;       // True for the very first chunk of an assistant message
+    bool m_hasRenderedAssistantContent; // True once visible assistant content has been rendered
+    wxColour m_activeAssistantColor;    // Color used for the current streaming response
 
     // Helper methods for formatting
     void AppendFormattedText(const std::string& text, const wxColour& color,

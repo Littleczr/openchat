@@ -39,6 +39,7 @@ struct ThemeData
     // ── Component backgrounds ────────────────────────────────────
     wxColour modelPillBg;       // Model pill, sidebar "New Chat" button, active conversation
     wxColour sidebarHover;      // Sidebar conversation item hover
+    wxColour sidebarSelected;   // Sidebar multi-select highlight
 
     // ── Attachment indicator ─────────────────────────────────────
     wxColour attachIndicator;   // Attachment label text color

@@ -1,53 +1,36 @@
-# ─── Visual Studio ────────────────────────────────────────────
-.vs/
-*.suo
-*.user
-*.userosscache
-*.sln.docstates
-
-# ─── Build output ─────────────────────────────────────────────
+# ── Build outputs ─────────────────────────────────────────────
 x64/
-x86/
 Debug/
 Release/
 out/
 build/
-[Bb]in/
-[Oo]bj/
-
-# ─── Auto-generated resource files ────────────────────────────
-*.aps
-
-# ─── vcpkg installed packages ─────────────────────────────────
-vcpkg_installed/
-
-# ─── Compiler / linker intermediates ──────────────────────────
 *.obj
-*.o
-*.pch
 *.pdb
 *.ilk
-*.idb
-*.exp
-*.lib
-*.dll
 *.exe
+*.dll
+*.lib
+*.exp
 *.log
-*.tlog
-*.ipch
-*.sdf
-*.opensdf
-*.opendb
-*.db
-*.ipdb
-*.iobj
 
-# ─── IntelliSense / browse DB ─────────────────────────────────
-*.VC.db
-*.VC.VC.opendb
-ipch/
+# ── Visual Studio ─────────────────────────────────────────────
+.vs/
+*.vcxproj.user
+*.suo
+*.user
+*.sln.docstates
+*.aps
 
-# ─── OS junk ──────────────────────────────────────────────────
+# ── vcpkg ─────────────────────────────────────────────────────
+vcpkg_installed/
+
+# ── OS junk ───────────────────────────────────────────────────
 Thumbs.db
+Desktop.ini
 .DS_Store
-desktop.ini
+
+# ── Editor / IDE ──────────────────────────────────────────────
+*.swp
+*~
+.vscode/
+.idea/

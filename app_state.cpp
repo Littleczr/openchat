@@ -15,7 +15,7 @@
 #include <Poco/AutoPtr.h>
 
 // Configuration constants
-const char* AppState::CONFIG_APP_NAME = "LlamaBoss";
+const char* AppState::CONFIG_APP_NAME = "OllamaChatApp";
 const char* AppState::CONFIG_MODEL_KEY = "Model";
 const char* AppState::CONFIG_API_URL_KEY = "ApiBaseUrl";
 const char* AppState::CONFIG_THEME_KEY = "Theme";
@@ -336,7 +336,7 @@ void AppState::InitializeLogger()
     Poco::Logger::root().setLevel(Poco::Message::PRIO_INFORMATION);
 
     // Get our application logger
-    m_logger = &Poco::Logger::get("LlamaBoss");
+    m_logger = &Poco::Logger::get("OllamaChatApp");
 }
 
 void AppState::SetDefaults()

@@ -30,10 +30,16 @@
     <ClCompile Include="chat_history.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="conversation_sidebar.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
     <ClCompile Include="app_state.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="markdown_renderer.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="message_router.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="theme.cpp">
@@ -59,10 +65,16 @@
     <ClInclude Include="chat_history.h">
       <Filter>Source Files</Filter>
     </ClInclude>
+    <ClInclude Include="conversation_sidebar.h">
+      <Filter>Source Files</Filter>
+    </ClInclude>
     <ClInclude Include="app_state.h">
       <Filter>Source Files</Filter>
     </ClInclude>
     <ClInclude Include="markdown_renderer.h">
+      <Filter>Source Files</Filter>
+    </ClInclude>
+    <ClInclude Include="message_router.h">
       <Filter>Source Files</Filter>
     </ClInclude>
     <ClInclude Include="theme.h">

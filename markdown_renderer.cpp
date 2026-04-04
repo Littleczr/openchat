@@ -20,7 +20,8 @@ MarkdownRenderer::MarkdownRenderer(wxRichTextCtrl* ctrl)
     : m_ctrl(ctrl)
     , m_inCodeBlock(false)
     , m_partialLineStart(-1)
-    , m_codeColor(232, 184, 77)             // Warm amber (#E8B84D)
+    , m_hasRenderedStableLine(false)
+    , m_codeColor(232, 184, 77)
     , m_headingColor(232, 232, 232)         // Near-white (#E8E8E8)
     , m_codeLabelColor(120, 120, 120)       // Gray
     , m_horizontalRuleColor(80, 80, 80)     // Dark gray
@@ -33,6 +34,7 @@ void MarkdownRenderer::Reset()
     m_inCodeBlock = false;
     m_codeBlockLang.clear();
     m_partialLineStart = -1;
+    m_hasRenderedStableLine = false;
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -45,13 +47,10 @@ void MarkdownRenderer::ProcessDelta(const std::string& delta, const wxColour& ba
 
     m_ctrl->Freeze();
 
-    // Remove previously rendered partial line (will be re-rendered below)
-    RemovePartialLine();
-
-    // Accumulate new text
+    // Accumulate new text only
     m_lineBuffer += delta;
 
-    // Extract and render all complete lines
+    // Render only complete lines
     size_t pos = 0;
     size_t newlinePos;
     while ((newlinePos = m_lineBuffer.find('\n', pos)) != std::string::npos) {
@@ -60,14 +59,9 @@ void MarkdownRenderer::ProcessDelta(const std::string& delta, const wxColour& ba
         pos = newlinePos + 1;
     }
 
-    // Remove processed text, keep the remainder as the new partial line
+    // Keep any incomplete trailing text buffered
     if (pos > 0) {
         m_lineBuffer = m_lineBuffer.substr(pos);
-    }
-
-    // Render the remaining partial line as plain text
-    if (!m_lineBuffer.empty()) {
-        RenderPartialLine(m_lineBuffer, baseColor);
     }
 
     m_ctrl->Thaw();
@@ -79,9 +73,8 @@ void MarkdownRenderer::Flush(const wxColour& baseColor)
     if (m_lineBuffer.empty()) return;
 
     m_ctrl->Freeze();
-    RemovePartialLine();
 
-    // Render the final partial line as a complete line
+    // Render the final buffered remainder as a complete line
     RenderCompleteLine(m_lineBuffer, baseColor);
     m_lineBuffer.clear();
 

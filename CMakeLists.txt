@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(LlamaBoss VERSION 1.2.0 LANGUAGES CXX)
+project(OpenChat VERSION 1.0.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -14,6 +14,8 @@ set(SOURCES
     settings.cpp
     markdown_renderer.cpp
     theme.cpp
+    conversation_sidebar.cpp
+    message_router.cpp
 )
 
 set(HEADERS
@@ -24,6 +26,8 @@ set(HEADERS
     settings.h
     markdown_renderer.h
     theme.h
+    conversation_sidebar.h
+    message_router.h
 )
 
 # ─── Find dependencies ───────────────────────────────────────────
@@ -76,7 +80,7 @@ endif()
 if(APPLE)
     set_target_properties(${PROJECT_NAME} PROPERTIES
         MACOSX_BUNDLE TRUE
-        MACOSX_BUNDLE_BUNDLE_NAME "LlamaBoss"
+        MACOSX_BUNDLE_BUNDLE_NAME "OpenChat"
         MACOSX_BUNDLE_BUNDLE_VERSION "${PROJECT_VERSION}"
         MACOSX_BUNDLE_SHORT_VERSION_STRING "${PROJECT_VERSION}"
     )
