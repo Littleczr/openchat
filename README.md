@@ -19,10 +19,15 @@ Fast, lightweight, and entirely local — no cloud, no telemetry, no Electron.
 - **Window persistence** — remembers position, size, and maximized state across sessions
 - **Settings dialog** — change model and API URL at runtime with live model fetching
 
-## Screenshot
+## Screenshots
 
-<!-- Replace with an actual screenshot -->
-<!-- ![OpenChat screenshot](docs/screenshot.png) -->
+**Directed multi-LLM routing** — address a specific model with `@model`, `,model`, or `model:` prefixes:
+
+![Directed routing screenshot](docs/screenshots/screenshot-directed-routing.jpg)
+
+**Multi-model group chat** — both models respond in round-robin order:
+
+![Group chat screenshot](docs/screenshots/screenshot-group-chat.png)
 
 ## Requirements
 
