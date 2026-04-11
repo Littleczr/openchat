@@ -1,8 +1,10 @@
 ﻿// settings.cpp
 #include "settings.h"
+#include "model_manager.h"
+#include "theme.h"
 #include <wx/fileconf.h>
 #include <wx/msgdlg.h>
-#include <wx/dirdlg.h>
+#include <Poco/JSON/JSONException.h>
 
 // Poco headers for HTTP requests
 #include <Poco/URI.h>
@@ -27,32 +29,32 @@ wxBEGIN_EVENT_TABLE(SettingsDialog, wxDialog)
 EVT_BUTTON(wxID_OK, SettingsDialog::OnOK)
 EVT_BUTTON(wxID_CANCEL, SettingsDialog::OnCancel)
 EVT_BUTTON(wxID_REFRESH, SettingsDialog::OnRefreshModels)
-EVT_TEXT(wxID_ANY, SettingsDialog::OnApiUrlChanged)
+EVT_TEXT(ID_SETTINGS_API_URL, SettingsDialog::OnApiUrlChanged)
 EVT_COMMAND(wxID_ANY, wxEVT_MODELS_RECEIVED, SettingsDialog::OnModelsReceived)
 EVT_COMMAND(wxID_ANY, wxEVT_MODELS_FETCH_ERROR, SettingsDialog::OnModelsFetchError)
 wxEND_EVENT_TABLE()
 
 SettingsDialog::SettingsDialog(wxWindow* parent, const std::string& currentModel,
                                const std::string& currentApiUrl, const std::string& currentTheme,
-                               bool currentWorkspaceEnabled, const std::string& currentWorkspacePath)
-    : wxDialog(parent, wxID_ANY, "Settings", wxDefaultPosition, wxSize(500, 420))
+                               const ThemeData& theme)
+    : wxDialog(parent, wxID_ANY, "Settings", wxDefaultPosition, wxSize(550, 325))
     , m_selectedModel(currentModel)
     , m_selectedApiUrl(currentApiUrl)
     , m_selectedTheme(currentTheme)
     , m_originalModel(currentModel)
     , m_originalApiUrl(currentApiUrl)
     , m_originalTheme(currentTheme)
-    , m_workspaceEnabled(currentWorkspaceEnabled)
-    , m_workspacePath(currentWorkspacePath)
-    , m_originalWorkspaceEnabled(currentWorkspaceEnabled)
-    , m_originalWorkspacePath(currentWorkspacePath)
     , m_modelChanged(false)
     , m_apiUrlChanged(false)
     , m_themeChanged(false)
-    , m_workspaceChanged(false)
     , m_isFetching(false)
-    // [STEP 4] m_fetchThread removed — no stored thread pointer
+    , m_theme(&theme)
 {
+    wxFont f = GetFont();
+    f.SetPointSize(10);
+    f.SetWeight(wxFONTWEIGHT_SEMIBOLD);
+    SetFont(f);
+
     CreateControls();
 
     // Auto-fetch models on startup
@@ -63,7 +65,7 @@ SettingsDialog::SettingsDialog(wxWindow* parent, const std::string& currentModel
 
 SettingsDialog::~SettingsDialog()
 {
-    // [STEP 4] Signal any running fetch thread to stop.
+    // Signal any running fetch thread to stop.
     // The thread checks this flag and will bail out + discard its event.
     // No dangling pointer — we never stored the thread pointer.
     if (m_cancelFlag) {
@@ -80,7 +82,7 @@ void SettingsDialog::CreateControls()
     mainSizer->Add(apiUrlLabel, 0, wxALL, 5);
 
     auto* apiUrlSizer = new wxBoxSizer(wxHORIZONTAL);
-    m_apiUrlTextCtrl = new wxTextCtrl(this, wxID_ANY, wxString::FromUTF8(m_selectedApiUrl));
+    m_apiUrlTextCtrl = new wxTextCtrl(this, ID_SETTINGS_API_URL, wxString::FromUTF8(m_selectedApiUrl));
     apiUrlSizer->Add(m_apiUrlTextCtrl, 1, wxEXPAND | wxRIGHT, 5);
 
     m_refreshButton = new wxButton(this, wxID_REFRESH, "Refresh Models");
@@ -96,6 +98,11 @@ void SettingsDialog::CreateControls()
         wxDefaultPosition, wxDefaultSize, 0, nullptr,
         wxCB_DROPDOWN | wxCB_SORT);
     mainSizer->Add(m_modelComboBox, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, 5);
+
+    // ── Manage Models button ─────────────────────────────────────
+    auto* manageBtn = new wxButton(this, wxID_ANY, "Manage Models...");
+    manageBtn->Bind(wxEVT_BUTTON, &SettingsDialog::OnManageModels, this);
+    mainSizer->Add(manageBtn, 0, wxLEFT | wxRIGHT | wxBOTTOM, 5);
 
     // Status and progress section
     m_statusText = new wxStaticText(this, wxID_ANY, "Ready");
@@ -128,32 +135,51 @@ void SettingsDialog::CreateControls()
 
     mainSizer->Add(m_themeComboBox, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, 5);
 
-    // ── Workspace section ────────────────────────────────────────
-    mainSizer->AddSpacer(5);
-    auto* workspaceLabel = new wxStaticText(this, wxID_ANY, "Workspace:");
-    mainSizer->Add(workspaceLabel, 0, wxLEFT | wxRIGHT | wxTOP, 5);
-
-    m_workspaceCheckBox = new wxCheckBox(this, wxID_ANY, "Enable workspace commands (/search)");
-    m_workspaceCheckBox->SetValue(m_workspaceEnabled);
-    mainSizer->Add(m_workspaceCheckBox, 0, wxLEFT | wxRIGHT | wxBOTTOM, 5);
-
-    auto* pathSizer = new wxBoxSizer(wxHORIZONTAL);
-    m_workspacePathCtrl = new wxTextCtrl(this, wxID_ANY,
-        wxString::FromUTF8(m_workspacePath));
-    pathSizer->Add(m_workspacePathCtrl, 1, wxEXPAND | wxRIGHT, 5);
-
-    m_workspaceBrowseButton = new wxButton(this, wxID_ANY, "Browse...");
-    m_workspaceBrowseButton->Bind(wxEVT_BUTTON, &SettingsDialog::OnBrowseWorkspace, this);
-    pathSizer->Add(m_workspaceBrowseButton, 0, wxALIGN_CENTER_VERTICAL);
-
-    mainSizer->Add(pathSizer, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, 5);
-
     // Buttons
     auto* buttonSizer = CreateButtonSizer(wxOK | wxCANCEL);
     mainSizer->Add(buttonSizer, 0, wxEXPAND | wxALL, 5);
 
     SetSizer(mainSizer);
     m_apiUrlTextCtrl->SetFocus();
+
+    // ── Apply theme colors ───────────────────────────────────────
+    if (m_theme) {
+        SetBackgroundColour(m_theme->sidebarSelected);
+
+        // Helper lambdas
+        auto styleLabel = [&](wxStaticText* lbl) {
+            lbl->SetForegroundColour(m_theme->textPrimary);
+        };
+        auto styleInput = [&](wxTextCtrl* ctrl) {
+            ctrl->SetBackgroundColour(*wxWHITE);
+            ctrl->SetForegroundColour(*wxBLACK);
+            };
+
+        auto styleCombo = [&](wxComboBox* cb) {
+            cb->SetBackgroundColour(*wxWHITE);
+            cb->SetForegroundColour(*wxBLACK);
+            };
+        auto styleButton = [&](wxButton* btn) {
+            btn->SetBackgroundColour(m_theme->modelPillBg);
+            btn->SetForegroundColour(m_theme->textPrimary);
+        };
+
+        // Style all child widgets by type
+        for (auto* child : GetChildren()) {
+            if (auto* lbl = dynamic_cast<wxStaticText*>(child))
+                styleLabel(lbl);
+            else if (auto* btn = dynamic_cast<wxButton*>(child))
+                styleButton(btn);
+            else if (auto* cb = dynamic_cast<wxComboBox*>(child))
+                styleCombo(cb);
+            else if (auto* tc = dynamic_cast<wxTextCtrl*>(child))
+                styleInput(tc);
+            else if (auto* chk = dynamic_cast<wxCheckBox*>(child))
+                chk->SetForegroundColour(m_theme->textPrimary);
+            else if (auto* gauge = dynamic_cast<wxGauge*>(child))
+                gauge->SetBackgroundColour(m_theme->bgToolbar);
+        }
+    }
 }
 
 void SettingsDialog::StartModelFetch()
@@ -169,7 +195,7 @@ void SettingsDialog::StartModelFetch()
     SetFetchingState(true);
     m_statusText->SetLabel("Fetching available models...");
 
-    // [STEP 3/4] Create a fresh cancel flag for this fetch.
+    // Create a fresh cancel flag for this fetch.
     // If a previous fetch is somehow still running, its old cancel flag
     // is now orphaned (but harmless — the thread holds a shared_ptr to it).
     m_cancelFlag = std::make_shared<std::atomic<bool>>(false);
@@ -217,22 +243,11 @@ void SettingsDialog::OnApiUrlChanged(wxCommandEvent& event)
     event.Skip();  // Let other controls (combo box) process their text events
 }
 
-void SettingsDialog::OnBrowseWorkspace(wxCommandEvent& /*event*/)
-{
-    wxDirDialog dlg(this, "Select Workspace Folder",
-                    m_workspacePathCtrl->GetValue(),
-                    wxDD_DEFAULT_STYLE | wxDD_DIR_MUST_EXIST);
-
-    if (dlg.ShowModal() == wxID_OK) {
-        m_workspacePathCtrl->SetValue(dlg.GetPath());
-    }
-}
-
 void SettingsDialog::OnModelsReceived(wxCommandEvent& event)
 {
     SetFetchingState(false);
 
-    // [STEP 3] Parse newline-separated model list from the event.
+    // Parse newline-separated model list from the event.
     // The thread packs model names into the event string so it never
     // writes directly to dialog members from the worker thread.
     std::vector<std::string> models;
@@ -275,7 +290,7 @@ void SettingsDialog::OnModelsFetchError(wxCommandEvent& event)
     }
 }
 
-// [STEP 3] PostModelsReceived and PostModelsFetchError removed —
+// PostModelsReceived and PostModelsFetchError removed —
 // the thread now communicates entirely through wxCommandEvents.
 
 void SettingsDialog::OnOK(wxCommandEvent& event)
@@ -292,17 +307,12 @@ void SettingsDialog::OnOK(wxCommandEvent& event)
     int themeSel = m_themeComboBox->GetSelection();
     m_selectedTheme = (themeSel == 2) ? "system" : (themeSel == 1) ? "light" : "dark";
 
-    m_workspaceEnabled = m_workspaceCheckBox->GetValue();
-    m_workspacePath = m_workspacePathCtrl->GetValue().ToStdString();
-
     m_modelChanged = (m_selectedModel != m_originalModel);
     m_apiUrlChanged = (m_selectedApiUrl != m_originalApiUrl);
     m_themeChanged = (m_selectedTheme != m_originalTheme);
-    m_workspaceChanged = (m_workspaceEnabled != m_originalWorkspaceEnabled ||
-                          m_workspacePath != m_originalWorkspacePath);
 
     // Save to config
-    wxFileConfig cfg("OllamaChatApp");
+    wxFileConfig cfg("LlamaBoss");
     cfg.Write("Model", wxString::FromUTF8(m_selectedModel));
     cfg.Write("ApiBaseUrl", wxString::FromUTF8(m_selectedApiUrl));
     cfg.Flush();
@@ -312,7 +322,7 @@ void SettingsDialog::OnOK(wxCommandEvent& event)
 
 void SettingsDialog::OnCancel(wxCommandEvent& event)
 {
-    // [STEP 4] Signal any running fetch to stop — no dangling pointer
+    // Signal any running fetch to stop — no dangling pointer
     if (m_cancelFlag) {
         m_cancelFlag->store(true);
     }
@@ -320,11 +330,21 @@ void SettingsDialog::OnCancel(wxCommandEvent& event)
     EndModal(wxID_CANCEL);
 }
 
+void SettingsDialog::OnManageModels(wxCommandEvent& /*event*/)
+{
+    std::string apiUrl = m_apiUrlTextCtrl->GetValue().ToStdString();
+    ModelManagerDialog dlg(this, apiUrl, m_theme);
+    dlg.ShowModal();
+
+    // After managing models, refresh the model list in settings
+    StartModelFetch();
+}
+
 // ═══════════════════════════════════════════════════════════════════
 // ModelFetchThread Implementation
 // ═══════════════════════════════════════════════════════════════════
 
-// [STEP 3] Takes a generic event handler + cancel flag instead of
+// Takes a generic event handler + cancel flag instead of
 // a raw SettingsDialog pointer.
 ModelFetchThread::ModelFetchThread(wxEvtHandler* handler,
                                    const std::string& apiUrl,
@@ -336,7 +356,7 @@ ModelFetchThread::ModelFetchThread(wxEvtHandler* handler,
 {
 }
 
-// [STEP 3] Post event only if not cancelled.
+// Post event only if not cancelled.
 bool ModelFetchThread::SafePost(wxCommandEvent* event)
 {
     if (m_cancelFlag->load()) {
@@ -392,7 +412,7 @@ wxThread::ExitCode ModelFetchThread::Entry()
         auto result = parser.parse(responseBody);
         auto obj = result.extract<Poco::JSON::Object::Ptr>();
 
-        // [STEP 3] Pack model names into a newline-separated string
+        // Pack model names into a newline-separated string
         // and send them through the event — no direct member writes.
         wxString modelList;
         if (obj->has("models")) {

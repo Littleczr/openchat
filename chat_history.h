@@ -1,7 +1,5 @@
 #pragma once
 // chat_history.h
-#ifndef CHAT_HISTORY_H
-#define CHAT_HISTORY_H
 
 #include <vector>
 #include <string>
@@ -116,4 +114,3 @@ private:
     static std::string CurrentTimestamp();
 };
 
-#endif // CHAT_HISTORY_H

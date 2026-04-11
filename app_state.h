@@ -1,7 +1,5 @@
 #pragma once
 // app_state.h
-#ifndef APP_STATE_H
-#define APP_STATE_H
 
 #include <wx/wx.h>
 #include <wx/font.h>
@@ -52,17 +50,15 @@ public:
     void SaveWindowState(wxFrame* frame);
     void RestoreWindowState(wxFrame* frame);
 
+    // Sidebar width persistence
+    int  GetSidebarWidth() const;
+    void SetSidebarWidth(int w);
+
     // Theme management
     const ThemeData& GetTheme() const { return m_themeManager.GetActiveTheme(); }
     ThemeManager& GetThemeManager() { return m_themeManager; }
     std::string GetThemeName() const { return m_themeManager.GetActiveThemeName(); }
     void SetTheme(const std::string& themeName);
-
-    // Workspace management
-    bool IsWorkspaceEnabled() const { return m_workspaceEnabled; }
-    std::string GetWorkspacePath() const { return m_workspacePath; }
-    void SetWorkspaceEnabled(bool enabled);
-    void SetWorkspacePath(const std::string& path);
 
 private:
     // Configuration data
@@ -75,10 +71,6 @@ private:
     Poco::Logger* m_logger;
     ThemeManager m_themeManager;
 
-    // Workspace configuration
-    bool m_workspaceEnabled;
-    std::string m_workspacePath;
-
     // Configuration file handling
     void LoadSettings();
     void InitializeLogger();
@@ -89,8 +81,4 @@ private:
     static const char* CONFIG_MODEL_KEY;
     static const char* CONFIG_API_URL_KEY;
     static const char* CONFIG_THEME_KEY;
-    static const char* CONFIG_WORKSPACE_ENABLED_KEY;
-    static const char* CONFIG_WORKSPACE_PATH_KEY;
 };
-
-#endif // APP_STATE_H

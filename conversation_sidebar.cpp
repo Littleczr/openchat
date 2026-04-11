@@ -59,13 +59,40 @@ ConversationSidebar::ConversationSidebar(wxWindow* parent,
     m_content->SetSizer(contentSizer);
     outerSizer->Add(m_content, 1, wxEXPAND);
 
-    // Vertical border on the right edge
-    m_border = new wxPanel(m_panel, wxID_ANY, wxDefaultPosition, wxSize(1, -1));
+    // Drag-resize handle on the right edge
+    m_border = new wxPanel(m_panel, wxID_ANY, wxDefaultPosition, wxSize(BORDER_WIDTH, -1));
     m_border->SetBackgroundColour(theme.borderSubtle);
+    m_border->SetCursor(wxCursor(wxCURSOR_SIZEWE));
     outerSizer->Add(m_border, 0, wxEXPAND);
 
     m_panel->SetSizer(outerSizer);
     m_panel->Hide();  // Start collapsed
+
+    // ── Bind drag-resize events on the border handle ──────────────
+    m_border->Bind(wxEVT_LEFT_DOWN, [this](wxMouseEvent& e) {
+        m_dragging = true;
+        m_dragStartX = m_border->ClientToScreen(e.GetPosition()).x;
+        m_dragStartWidth = m_panel->GetMinSize().x;
+        m_border->CaptureMouse();
+    });
+    m_border->Bind(wxEVT_MOTION, [this](wxMouseEvent& e) {
+        if (!m_dragging) return;
+        int screenX = m_border->ClientToScreen(e.GetPosition()).x;
+        int delta = screenX - m_dragStartX;
+        int newW = std::clamp(m_dragStartWidth + delta, MIN_WIDTH, MAX_WIDTH);
+        m_panel->SetMinSize(wxSize(newW, -1));
+        m_panel->GetParent()->Layout();
+    });
+    m_border->Bind(wxEVT_LEFT_UP, [this](wxMouseEvent&) {
+        if (!m_dragging) return;
+        m_dragging = false;
+        if (m_border->HasCapture()) m_border->ReleaseMouse();
+        if (m_callbacks.onResized)
+            m_callbacks.onResized(m_panel->GetMinSize().x);
+    });
+    m_border->Bind(wxEVT_MOUSE_CAPTURE_LOST, [this](wxMouseCaptureLostEvent&) {
+        m_dragging = false;
+    });
 
     // ── Bind events ──────────────────────────────────────────────
     m_newChatButton->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) {
@@ -99,6 +126,17 @@ void ConversationSidebar::Toggle()
         Hide();
     else
         Show();
+}
+
+int ConversationSidebar::GetWidth() const
+{
+    return m_panel->GetMinSize().x;
+}
+
+void ConversationSidebar::SetWidth(int w)
+{
+    w = std::clamp(w, MIN_WIDTH, MAX_WIDTH);
+    m_panel->SetMinSize(wxSize(w, -1));
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -323,7 +361,7 @@ void ConversationSidebar::BuildListEntry(const ConversationEntry& entry)
     }
     auto* titleLabel = new wxStaticText(panel, wxID_ANY,
         wxString::FromUTF8(displayTitle));
-    titleLabel->SetForegroundColour(m_theme->textMuted);
+    titleLabel->SetForegroundColour(wxColour(125, 212, 160));
     wxFont titleFont = titleLabel->GetFont();
     titleFont.SetPointSize(11);
     titleFont.SetWeight(wxFONTWEIGHT_BOLD);

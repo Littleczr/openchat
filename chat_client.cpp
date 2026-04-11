@@ -1,5 +1,6 @@
 ﻿// chat_client.cpp
 #include "chat_client.h"
+#include <Poco/JSON/JSONException.h>
 
 // Poco headers for HTTP communication
 #include <Poco/URI.h>
@@ -31,20 +32,20 @@ ChatWorkerThread::ChatWorkerThread(wxEvtHandler* eventHandler,
     const std::string& apiUrl,
     const std::string& requestBody,
     std::shared_ptr<std::atomic<bool>> cancelFlag,
-    std::weak_ptr<std::atomic<bool>> aliveToken,       // [STEP 1]
-    uint64_t generationId)                             // [STEP 2]
+    std::weak_ptr<std::atomic<bool>> aliveToken,
+    unsigned long generationId)
     : wxThread(wxTHREAD_DETACHED)
     , m_eventHandler(eventHandler)
     , m_model(model)
     , m_apiUrl(apiUrl)
     , m_requestBody(requestBody)
     , m_cancelFlag(cancelFlag)
-    , m_aliveToken(aliveToken)                         // [STEP 1]
-    , m_generationId(generationId)                     // [STEP 2]
+    , m_aliveToken(aliveToken)
+    , m_generationId(generationId)
 {
 }
 
-// ── [STEP 1] Safe event posting ──────────────────────────────────
+// ── Safe event posting ──────────────────────────────────
 // Checks that the event handler's owner (MyFrame) is still alive
 // before posting.  If the owner is gone the event is deleted and
 // we return false so the caller knows to bail out.
@@ -55,9 +56,9 @@ bool ChatWorkerThread::SafeQueueEvent(wxCommandEvent* event)
         delete event;   // owner is gone — discard event
         return false;
     }
-    // [STEP 2] Stamp every event with the generation ID so the
+    // Stamp every event with the generation ID so the
     // handler can discard stale events from a previous request.
-    event->SetExtraLong(static_cast<long>(m_generationId));
+    event->SetExtraLong(m_generationId);
     wxQueueEvent(m_eventHandler, event);
     return true;
 }
@@ -95,7 +96,7 @@ wxThread::ExitCode ChatWorkerThread::Entry()
             std::string err;
             Poco::StreamCopier::copyToString(in, err);
 
-            // [STEP 1] Post error via SafeQueueEvent
+            // Post error via SafeQueueEvent
             wxCommandEvent* event = new wxCommandEvent(wxEVT_ASSISTANT_ERROR);
             event->SetString(wxString::FromUTF8(
                 "API Error: " + resp.getReason() + " - " + err
@@ -121,7 +122,7 @@ wxThread::ExitCode ChatWorkerThread::Entry()
                         std::string delta = msgObj->getValue<std::string>("content");
                         fullReply += delta;
 
-                        // [STEP 1] Post delta via SafeQueueEvent
+                        // Post delta via SafeQueueEvent
                         wxCommandEvent* event = new wxCommandEvent(wxEVT_ASSISTANT_DELTA);
                         event->SetString(wxString::FromUTF8(delta));
                         if (!SafeQueueEvent(event))
@@ -131,14 +132,14 @@ wxThread::ExitCode ChatWorkerThread::Entry()
                 if (obj->has("done") && obj->getValue<bool>("done"))
                     break;
             }
-            catch (const Poco::JSON::JSONException& ex) {
+            catch (const Poco::JSON::JSONException&) {
                 // Skip malformed JSON lines
                 continue;
             }
         }
 
         if (!isCancelled()) {
-            // [STEP 1] Post completion via SafeQueueEvent
+            // Post completion via SafeQueueEvent
             wxCommandEvent* event = new wxCommandEvent(wxEVT_ASSISTANT_COMPLETE);
             event->SetString(wxString::FromUTF8(fullReply));
             SafeQueueEvent(event);
@@ -180,7 +181,7 @@ wxThread::ExitCode ChatWorkerThread::Entry()
 // ChatClient Implementation
 // ═══════════════════════════════════════════════════════════════════
 
-// [STEP 1] Constructor now stores a weak liveness token
+// Constructor now stores a weak liveness token
 ChatClient::ChatClient(wxEvtHandler* eventHandler,
                        std::weak_ptr<std::atomic<bool>> aliveToken)
     : m_eventHandler(eventHandler)
@@ -194,11 +195,11 @@ ChatClient::~ChatClient()
     StopGeneration();
 }
 
-// [STEP 2] SendMessage now takes a generationId to pass through
+// SendMessage now takes a generationId to pass through
 bool ChatClient::SendMessage(const std::string& model,
     const std::string& apiUrl,
     const std::string& requestBody,
-    uint64_t generationId)
+    unsigned long generationId)
 {
     if (m_isStreaming) {
         return false; // Already streaming
@@ -209,7 +210,7 @@ bool ChatClient::SendMessage(const std::string& model,
 
     auto* thread = new ChatWorkerThread(
         m_eventHandler, model, apiUrl, requestBody,
-        m_cancelFlag, m_aliveToken, generationId);   // [STEP 1 + 2]
+        m_cancelFlag, m_aliveToken, generationId);
 
     if (thread->Run() != wxTHREAD_NO_ERROR) {
         // Thread not yet started — safe to delete manually

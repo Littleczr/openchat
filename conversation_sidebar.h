@@ -30,6 +30,7 @@ public:
         std::function<void(const std::string& path)>              onConversationClicked;
         std::function<void()>                                      onNewChatClicked;
         std::function<void(const std::vector<std::string>& paths)> onDeleteRequested;
+        std::function<void(int width)>                             onResized;  // sidebar width changed
     };
 
     ConversationSidebar(wxWindow* parent, const ThemeData& theme,
@@ -41,6 +42,10 @@ public:
     void Hide();
     bool IsVisible() const;
     void Toggle();
+
+    // ── Resizing ──────────────────────────────────────────────────
+    int  GetWidth() const;
+    void SetWidth(int w);
 
     // ── Content ──────────────────────────────────────────────────
     // Rebuild the conversation list from disk.
@@ -68,7 +73,15 @@ private:
     // ── UI widgets ───────────────────────────────────────────────
     wxPanel*          m_panel;            // Outer panel (contains content + border)
     wxPanel*          m_content;          // Content area (button + list)
-    wxPanel*          m_border;           // 1px vertical border on right edge
+    wxPanel*          m_border;           // Drag handle / vertical border on right edge
+
+    // ── Drag-resize state ─────────────────────────────────────────
+    bool m_dragging = false;
+    int  m_dragStartX = 0;
+    int  m_dragStartWidth = 0;
+    static constexpr int BORDER_WIDTH = 5;
+    static constexpr int MIN_WIDTH = 180;
+    static constexpr int MAX_WIDTH = 600;
     wxButton*         m_newChatButton;    // "+ New Chat" button
     wxScrolledWindow* m_listWindow;       // Scrollable conversation list
     wxBoxSizer*       m_listSizer;        // Sizer inside m_listWindow

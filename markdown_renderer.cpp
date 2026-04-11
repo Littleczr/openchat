@@ -35,6 +35,31 @@ void MarkdownRenderer::Reset()
     m_codeBlockLang.clear();
     m_partialLineStart = -1;
     m_hasRenderedStableLine = false;
+    // Note: m_codeBlocks is intentionally NOT cleared here —
+    // old code blocks from previous messages must remain accessible.
+    // Call ClearCodeBlocks() explicitly when the entire chat is cleared.
+    m_currentCodeContent.clear();
+}
+
+const std::string& MarkdownRenderer::GetCodeBlock(size_t index) const
+{
+    static const std::string empty;
+    return index < m_codeBlocks.size() ? m_codeBlocks[index] : empty;
+}
+
+void MarkdownRenderer::ClearCodeBlocks()
+{
+    m_codeBlocks.clear();
+    m_copyLinks.clear();
+}
+
+int MarkdownRenderer::HitTestCopyLink(long pos) const
+{
+    for (const auto& link : m_copyLinks) {
+        if (pos >= link.startPos && pos < link.endPos)
+            return static_cast<int>(link.blockIndex);
+    }
+    return -1;
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -122,13 +147,28 @@ void MarkdownRenderer::RenderCompleteLine(const std::string& line, const wxColou
     // ── Code fence? ──────────────────────────────────────────────
     if (IsCodeFence(line)) {
         if (m_inCodeBlock) {
-            // Closing fence — end code block
+            // Closing fence — store code block and render [Copy] link
+            // Trim trailing newline from accumulated content
+            if (!m_currentCodeContent.empty() && m_currentCodeContent.back() == '\n')
+                m_currentCodeContent.pop_back();
+            size_t idx = m_codeBlocks.size();
+            m_codeBlocks.push_back(m_currentCodeContent);
+            m_currentCodeContent.clear();
+
+            // Render [Copy] link and record its character range
+            long linkStart = m_ctrl->GetLastPosition();
+            WriteStyled("\xF0\x9F\x93\x8B Copy", m_codeLabelColor, false, true, true);
+            long linkEnd = m_ctrl->GetLastPosition();
+            m_copyLinks.push_back({ linkStart, linkEnd, idx });
+            WriteStyled("\n", m_codeLabelColor);
+
             m_inCodeBlock = false;
             m_codeBlockLang.clear();
         }
         else {
             // Opening fence — start code block, extract language tag
             m_inCodeBlock = true;
+            m_currentCodeContent.clear();
             std::string trimmed = line;
             size_t start = trimmed.find_first_not_of(" \t");
             if (start != std::string::npos) trimmed = trimmed.substr(start);
@@ -192,6 +232,7 @@ void MarkdownRenderer::RenderCompleteLine(const std::string& line, const wxColou
 
 void MarkdownRenderer::RenderCodeBlockLine(const std::string& line)
 {
+    m_currentCodeContent += line + "\n";
     WriteStyled(line + "\n", m_codeColor, false, false, true);
 }
 

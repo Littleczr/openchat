@@ -1,6 +1,5 @@
 // chat_display.h
-#ifndef CHAT_DISPLAY_H
-#define CHAT_DISPLAY_H
+#pragma once
 
 #include <wx/wx.h>
 #include <wx/richtext/richtextctrl.h>
@@ -70,4 +69,3 @@ private:
     void EnsureVisibleAtEnd();
 };
 
-#endif // CHAT_DISPLAY_H

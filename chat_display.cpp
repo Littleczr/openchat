@@ -2,6 +2,7 @@
 #include "chat_display.h"
 #include "markdown_renderer.h"
 #include "theme.h"
+#include <wx/clipbrd.h>
 
 ChatDisplay::ChatDisplay(wxRichTextCtrl* displayCtrl)
     : m_displayCtrl(displayCtrl)
@@ -18,6 +19,41 @@ ChatDisplay::ChatDisplay(wxRichTextCtrl* displayCtrl)
     // Configure markdown renderer colors to match theme
     m_markdownRenderer->SetCodeColor(wxColour(232, 184, 77));      // Warm amber (#E8B84D)
     m_markdownRenderer->SetHeadingColor(wxColour(232, 232, 232));  // Near-white (#E8E8E8)
+
+    // ── Code block copy: click handler ────────────────────────────
+    m_displayCtrl->Bind(wxEVT_LEFT_UP, [this](wxMouseEvent& event) {
+        event.Skip();  // Let normal text selection proceed
+
+        long pos = 0;
+        auto hit = m_displayCtrl->HitTest(event.GetPosition(), &pos);
+        if (hit == wxTE_HT_ON_TEXT || hit == wxTE_HT_BEFORE) {
+            int blockIdx = m_markdownRenderer->HitTestCopyLink(pos);
+            if (blockIdx >= 0) {
+                const std::string& code = m_markdownRenderer->GetCodeBlock(static_cast<size_t>(blockIdx));
+                if (wxTheClipboard->Open()) {
+                    wxTheClipboard->SetData(new wxTextDataObject(wxString::FromUTF8(code)));
+                    wxTheClipboard->Close();
+                }
+            }
+        }
+    });
+
+    // ── Code block copy: hand cursor on hover ─────────────────────
+    m_displayCtrl->Bind(wxEVT_MOTION, [this](wxMouseEvent& event) {
+        long pos = 0;
+        auto hit = m_displayCtrl->HitTest(event.GetPosition(), &pos);
+        bool overLink = false;
+        if (hit == wxTE_HT_ON_TEXT || hit == wxTE_HT_BEFORE) {
+            overLink = (m_markdownRenderer->HitTestCopyLink(pos) >= 0);
+        }
+        if (overLink) {
+            m_displayCtrl->SetCursor(wxCursor(wxCURSOR_HAND));
+            // Don't Skip — prevents wxRichTextCtrl from resetting cursor
+        } else {
+            m_displayCtrl->SetCursor(wxCursor(wxCURSOR_IBEAM));
+            event.Skip();
+        }
+    });
 }
 
 ChatDisplay::~ChatDisplay()
@@ -266,6 +302,7 @@ void ChatDisplay::Clear()
     }
     if (m_markdownRenderer) {
         m_markdownRenderer->Reset();
+        m_markdownRenderer->ClearCodeBlocks();
     }
 }
 

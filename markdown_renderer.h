@@ -4,8 +4,7 @@
 // markdown formatting (bold, italic, code, headings, lists, code blocks)
 // while showing partial lines as plain text until they complete.
 
-#ifndef MARKDOWN_RENDERER_H
-#define MARKDOWN_RENDERER_H
+#pragma once
 
 #include <wx/wx.h>
 #include <wx/richtext/richtextctrl.h>
@@ -32,6 +31,18 @@ public:
     void SetCodeLabelColor(const wxColour& color)       { m_codeLabelColor = color; }
     void SetHorizontalRuleColor(const wxColour& color)  { m_horizontalRuleColor = color; }
 
+    // ── Code block copy support ───────────────────────────────────
+    struct CopyLink {
+        long startPos;       // Character position where "📋 Copy" starts
+        long endPos;         // Character position where it ends
+        size_t blockIndex;   // Index into m_codeBlocks
+    };
+    size_t GetCodeBlockCount() const { return m_codeBlocks.size(); }
+    const std::string& GetCodeBlock(size_t index) const;
+    void ClearCodeBlocks();
+    // Returns block index if pos is inside a [Copy] link, or -1
+    int HitTestCopyLink(long pos) const;
+
 private:
     wxRichTextCtrl* m_ctrl;
 
@@ -47,6 +58,11 @@ private:
     wxColour m_headingColor;
     wxColour m_codeLabelColor;
     wxColour m_horizontalRuleColor;
+
+    // ── Code block copy tracking ──────────────────────────────────
+    std::vector<std::string>  m_codeBlocks;         // Completed code block contents
+    std::vector<CopyLink>     m_copyLinks;          // Clickable [Copy] link positions
+    std::string               m_currentCodeContent;  // Accumulating during current block
 
     // ── Block-level rendering ────────────────────────────────────
     void RenderCompleteLine(const std::string& line, const wxColour& baseColor);
@@ -78,4 +94,3 @@ private:
     std::string TrimLeading(const std::string& s, char c) const;
 };
 
-#endif // MARKDOWN_RENDERER_H

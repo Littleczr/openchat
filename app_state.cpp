@@ -7,8 +7,6 @@
 #include <wx/log.h>
 #include <wx/icon.h>
 #include <wx/display.h>
-#include <wx/stdpaths.h>
-#include <wx/filename.h>
 
 // Poco headers
 #include <Poco/ConsoleChannel.h>
@@ -17,12 +15,10 @@
 #include <Poco/AutoPtr.h>
 
 // Configuration constants
-const char* AppState::CONFIG_APP_NAME = "OllamaChatApp";
+const char* AppState::CONFIG_APP_NAME = "LlamaBoss";
 const char* AppState::CONFIG_MODEL_KEY = "Model";
 const char* AppState::CONFIG_API_URL_KEY = "ApiBaseUrl";
 const char* AppState::CONFIG_THEME_KEY = "Theme";
-const char* AppState::CONFIG_WORKSPACE_ENABLED_KEY = "WorkspaceEnabled";
-const char* AppState::CONFIG_WORKSPACE_PATH_KEY = "WorkspacePath";
 
 AppState::AppState()
     : m_currentModel("")
@@ -30,7 +26,6 @@ AppState::AppState()
     , m_defaultModel("llama3")
     , m_defaultApiUrl("http://127.0.0.1:11434")
     , m_logger(nullptr)
-    , m_workspaceEnabled(false)
 {
     SetDefaults();
 }
@@ -104,33 +99,6 @@ void AppState::SetTheme(const std::string& themeName)
     }
 }
 
-void AppState::SetWorkspaceEnabled(bool enabled)
-{
-    if (m_workspaceEnabled != enabled) {
-        m_workspaceEnabled = enabled;
-        SaveSettings();
-
-        if (m_logger) {
-            m_logger->information(std::string("Workspace ") +
-                (enabled ? "enabled" : "disabled"));
-        }
-    }
-}
-
-void AppState::SetWorkspacePath(const std::string& path)
-{
-    if (m_workspacePath != path) {
-        std::string previous = m_workspacePath;
-        m_workspacePath = path;
-        SaveSettings();
-
-        if (m_logger) {
-            m_logger->information("Workspace path changed from '" +
-                previous + "' to '" + path + "'");
-        }
-    }
-}
-
 void AppState::SaveSettings()
 {
     try {
@@ -138,14 +106,11 @@ void AppState::SaveSettings()
         cfg.Write(CONFIG_MODEL_KEY, wxString::FromUTF8(m_currentModel));
         cfg.Write(CONFIG_API_URL_KEY, wxString::FromUTF8(m_currentApiUrl));
         cfg.Write(CONFIG_THEME_KEY, wxString::FromUTF8(m_themeManager.GetActiveThemeName()));
-        cfg.Write(CONFIG_WORKSPACE_ENABLED_KEY, m_workspaceEnabled);
-        cfg.Write(CONFIG_WORKSPACE_PATH_KEY, wxString::FromUTF8(m_workspacePath));
         cfg.Flush();
 
         if (m_logger) {
             m_logger->information("Settings saved - Model: " + m_currentModel +
-                ", API: " + m_currentApiUrl + ", Theme: " + m_themeManager.GetActiveThemeName() +
-                ", Workspace: " + std::string(m_workspaceEnabled ? "on" : "off"));
+                ", API: " + m_currentApiUrl + ", Theme: " + m_themeManager.GetActiveThemeName());
         }
     }
     catch (const std::exception& ex) {
@@ -162,27 +127,39 @@ wxFont AppState::CreateMonospaceFont(int size) const
         false, "Cascadia Code");
 }
 
-bool AppState::LoadApplicationIcon(wxFrame* frame, const std::string& iconPath)
+bool AppState::LoadApplicationIcon(wxFrame* frame, const std::string& /*iconPath*/)
 {
     if (!frame) {
         return false;
     }
 
-    wxIcon icon;
-    if (icon.LoadFile(iconPath, wxBITMAP_TYPE_ICO)) {
+#ifdef __WXMSW__
+    // Load from the Win32 resource embedded by LlamaBoss.rc.
+    // This works regardless of the exe's working directory.
+    wxIcon icon("APP_ICON", wxBITMAP_TYPE_ICO_RESOURCE);
+    if (icon.IsOk()) {
         frame->SetIcon(icon);
         if (m_logger) {
-            m_logger->information("Application icon loaded: " + iconPath);
+            m_logger->information("Application icon loaded from embedded resource");
         }
         return true;
     }
-    else {
-        wxLogWarning("Could not load application icon: %s", iconPath.c_str());
+#endif
+
+    // Fallback: try loading from file next to the exe
+    wxIcon fileIcon;
+    if (fileIcon.LoadFile("app_icon.ico", wxBITMAP_TYPE_ICO)) {
+        frame->SetIcon(fileIcon);
         if (m_logger) {
-            m_logger->warning("Could not load application icon: " + iconPath);
+            m_logger->information("Application icon loaded from file");
         }
-        return false;
+        return true;
     }
+
+    if (m_logger) {
+        m_logger->warning("Could not load application icon");
+    }
+    return false;
 }
 
 bool AppState::UpdateSettings(const std::string& newModel, const std::string& newApiUrl,
@@ -222,9 +199,7 @@ void AppState::LogStartupMessage() const
 {
     if (m_logger) {
         m_logger->information("Application started - Model: " + m_currentModel +
-            ", API: " + m_currentApiUrl + ", Theme: " + m_themeManager.GetActiveThemeName() +
-            ", Workspace: " + std::string(m_workspaceEnabled ? "on" : "off") +
-            " (" + m_workspacePath + ")");
+            ", API: " + m_currentApiUrl + ", Theme: " + m_themeManager.GetActiveThemeName());
     }
 }
 
@@ -325,6 +300,21 @@ void AppState::RestoreWindowState(wxFrame* frame)
     }
 }
 
+int AppState::GetSidebarWidth() const
+{
+    wxFileConfig cfg(CONFIG_APP_NAME);
+    int w = 260;  // default
+    cfg.Read("SidebarWidth", &w);
+    return w;
+}
+
+void AppState::SetSidebarWidth(int w)
+{
+    wxFileConfig cfg(CONFIG_APP_NAME);
+    cfg.Write("SidebarWidth", w);
+    cfg.Flush();
+}
+
 // Private methods
 
 void AppState::LoadSettings()
@@ -347,24 +337,6 @@ void AppState::LoadSettings()
     wxString savedTheme;
     if (cfg.Read(CONFIG_THEME_KEY, &savedTheme)) {
         m_themeManager.SetActiveTheme(savedTheme.ToStdString());
-    }
-
-    // Load workspace settings
-    bool savedWorkspaceEnabled = false;
-    if (cfg.Read(CONFIG_WORKSPACE_ENABLED_KEY, &savedWorkspaceEnabled)) {
-        m_workspaceEnabled = savedWorkspaceEnabled;
-    }
-
-    wxString savedWorkspacePath;
-    if (cfg.Read(CONFIG_WORKSPACE_PATH_KEY, &savedWorkspacePath)) {
-        m_workspacePath = savedWorkspacePath.ToStdString();
-    }
-
-    // Compute default workspace path if none was saved
-    if (m_workspacePath.empty()) {
-        wxString docsDir = wxStandardPaths::Get().GetDocumentsDir();
-        m_workspacePath = (docsDir + wxFileName::GetPathSeparator()
-                          + "LlamaBossWorkspace").ToStdString();
     }
 
     // Ensure we have valid defaults
@@ -391,7 +363,7 @@ void AppState::InitializeLogger()
     Poco::Logger::root().setLevel(Poco::Message::PRIO_INFORMATION);
 
     // Get our application logger
-    m_logger = &Poco::Logger::get("OllamaChatApp");
+    m_logger = &Poco::Logger::get("LlamaBoss");
 }
 
 void AppState::SetDefaults()

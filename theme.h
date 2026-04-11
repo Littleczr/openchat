@@ -1,5 +1,5 @@
 // theme.h
-// Centralized theme definitions for OpenChat.
+// Centralized theme definitions for LlamaBoss.
 // ThemeData holds every color used across the UI.
 // ThemeManager provides preset themes and tracks the active selection.
 

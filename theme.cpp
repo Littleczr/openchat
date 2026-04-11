@@ -1,5 +1,5 @@
 // theme.cpp
-// Preset theme definitions for OpenChat.
+// Preset theme definitions for LlamaBoss.
 
 #include "theme.h"
 
@@ -47,7 +47,7 @@ std::string ThemeManager::DetectSystemTheme()
     return "dark";  // Fallback
 }
 // ═══════════════════════════════════════════════════════════════════
-//  Dark Theme — Telegram-inspired (original OpenChat colors)
+//  Dark Theme — Telegram-inspired (original LlamaBoss colors)
 // ═══════════════════════════════════════════════════════════════════
 
 ThemeData ThemeManager::GetDarkTheme()
